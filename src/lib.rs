@@ -48,7 +48,6 @@ trait Layout {
 }
 
 /// A trait for shape- and stride- related functions.
-#[portrait::make]
 trait NdLayout<D> {
     fn len(&self) -> usize;
 
