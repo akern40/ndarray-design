@@ -11,12 +11,10 @@ use core::ptr::NonNull;
 
 fn ergonomic_raw<A, D>(arr: &RawArrayRef<A, D>) {}
 fn ergonomic<A, D>(arr: &ArrayRef<A, D>) {}
-fn powerful<A, D, T: RawNdArray<A, D>>(arr: &T) {}
 
 fn caller<A, D: Layout>(arr: Array<A, D>) {
     ergonomic_raw(&arr);
     ergonomic(&arr);
-    powerful(arr.deref());
 }
 
 /////////////////////////
