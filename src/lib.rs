@@ -2,7 +2,6 @@
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use std::sync::Arc;
 
 //////////////////////
 /// TEST FUNCTIONS ///
@@ -317,83 +316,3 @@ impl<A, D: Layout> RawNdArray<A, D> for ArrayRef<A, D> {
         self.try_is_unique()
     }
 }
-
-// impl<A, D: Layout> NdLayout<D> for RawArcArrayRef<A, D> {
-//     fn len(&self) -> usize {
-//         self.dim.size()
-//     }
-// }
-
-// #[derive(Debug)]
-// pub struct ArcArray<A, D> {
-//     meta: ArcArrayRef<A, D>,
-//     cap: usize,
-// }
-
-// /// A reference to an array whose elements are safe to dereference.
-// #[derive(Debug)]
-// pub struct ArcArrayRef<A, D>(RawArcArrayRef<A, D>);
-
-// /// A reference to an array whose elements may not be safe to dereference.
-// #[derive(Debug)]
-// pub struct RawArcArrayRef<A, D> {
-//     dim: D,
-//     strides: D,
-//     ptr: Arc<NonNull<A>>,
-// }
-
-// // Define a new struct that holds references to the data
-// struct RawArrayRefRef<'a, A, D> {
-//     dim: &'a D,
-//     strides: &'a D,
-//     ptr: NonNull<A>,
-// }
-
-// impl<'a, A, D> Deref for ArcArray<A, D> {
-//     type Target = ArcArrayRef<A, D>;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.meta
-//     }
-// }
-
-// impl<'a, A, D> DerefMut for ArcArray<A, D> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.meta
-//     }
-// }
-
-// impl<A, D> Deref for ArcArrayRef<A, D> {
-//     type Target = RawArcArrayRef<A, D>;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
-// impl<A, D> DerefMut for ArcArrayRef<A, D> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.0
-//     }
-// }
-
-// impl<A, D: NdLayout> RawArrayable<A, D> for RawArcArrayRef<A, D> {
-//     fn ptr(&self) -> &NonNull<A> {
-//         &self.ptr
-//     }
-// }
-
-// impl<A, D: NdLayout> RawNdArrayRefMut<A, D> for RawArcArrayRef<A, D> {
-//     fn ptr_mut(&mut self) -> &mut NonNull<A> {
-//         self.try_ensure_unique();
-//         Arc::make_mut(&mut self.ptr)
-//     }
-
-//     fn try_ensure_unique(&mut self) {
-//         // All the stuff from OwnedArcRepr
-//     }
-
-//     fn try_is_unique(&mut self) -> Option<bool> {
-//         Some(Arc::get_mut(&mut self.ptr).is_some())
-//     }
-// }
