@@ -15,21 +15,21 @@ mod test_functions {
         RawArrayViewMut, RawNdArray,
     };
 
-    fn ergonomic_raw<A, L: Layout>(arr: &RawArrayRef<A, L>) {
+    fn ergonomic_raw<A: Clone, L: Layout>(arr: &RawArrayRef<A, L>) {
         println!("{:?}", arr.ptr());
     }
-    fn ergonomic<A: Debug, L: Layout>(arr: &ArrayRef<A, L>) {
+    fn ergonomic<A: Debug + Clone, L: Layout>(arr: &ArrayRef<A, L>) {
         println!("{:?}", arr.first());
     }
-    fn ergonomic_raw_mut<A, L: Layout>(arr: &mut RawArrayRef<A, L>) {
+    fn ergonomic_raw_mut<A: Clone, L: Layout>(arr: &mut RawArrayRef<A, L>) {
         println!("{:?}", arr.ptr_mut());
     }
-    fn ergonomic_mut<A: Debug, L: Layout>(arr: &mut ArrayRef<A, L>) {
+    fn ergonomic_mut<A: Debug + Clone, L: Layout>(arr: &mut ArrayRef<A, L>) {
         println!("{:?}", arr.first_mut());
     }
 
     /// Scaffolding to call the above functions; arguments are move to simulate fully-owned values.
-    fn caller<A, L: Layout>(
+    fn caller<A: Clone + Debug, L: Layout>(
         mut arr: Array<A, L>,
         arr_view: ArrayView<A, L>,
         mut arr_view_mut: ArrayViewMut<A, L>,
@@ -45,6 +45,7 @@ mod test_functions {
         ergonomic(&arr_view);
         // Fails to compile because you can't get a mutable reference
         ergonomic_raw_mut(&mut arr_view);
+        // Fails to compile because you can't get a mutable reference
         ergonomic_mut(&mut arr_view);
 
         ergonomic_raw(&arr_view_mut);
@@ -151,6 +152,41 @@ mod trait_defs {
     }
 }
 
+mod ptrs {
+    //! ## Array Pointer Wrappers
+    //!
+    //! In order to support using smart pointers such as `Arc` or `Cow` to wrap
+    //! the pointer to an array's data, one of two options must be taken.
+    //! The first option is what's implemented here: do not encode the type of smart
+    //! pointer into the type system of `ndarray`, and instead rely on runtime values.
+    //! This options has the advantage of avoiding the "third generic", but has several
+    //! disadvantages. First, including Cow requires any element of *any* ndarray to
+    //! implement `Clone`. Second, it makes it impossible for users to employ the type
+    //! system to reason about traits. Finally, it may have runtime implications that are
+    //! difficult to benchmark, since the pointer is an often-accessed value that is now
+    //! behind an additional layer of runtime abstraction.
+    //!
+    //! The second option is to encode the pointer wrapper type as a generic parameter,
+    //! thereby reintroducing the third generic. This essentially has none of the disadvantages
+    //! of the first option, but is slightly less ergonomic. I'll implement that in another branch
+    //! and share it after this one.
+
+    use std::{
+        borrow::{BorrowMut, Cow},
+        ptr::NonNull,
+        rc::Rc,
+        sync::Arc,
+    };
+
+    #[derive(Debug)]
+    pub(crate) enum ArrayPtr<'a, A: Clone> {
+        Owned(NonNull<A>),
+        Arc(Arc<A>),
+        Cow(Cow<'a, A>),
+        Rc(Rc<A>),
+    }
+}
+
 mod array_refs {
     //! ## Array Reference Structs
     //!
@@ -158,34 +194,33 @@ mod array_refs {
     //! define *references* to arrays. The point of this is that the references - not the arrays -
     //! will hold most of the behavior of a multidimensional array.
 
-    use std::{
-        ops::{Deref, DerefMut},
-        ptr::NonNull,
-    };
+    use std::ops::{Deref, DerefMut};
+
+    use crate::ptrs::ArrayPtr;
 
     /// A reference to an array whose elements may not be safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayRef<A, L> {
+    pub struct RawArrayRef<'a, A: Clone, L> {
         pub(crate) layout: L,
-        pub(crate) ptr: NonNull<A>,
+        pub(crate) ptr: ArrayPtr<'a, A>,
     }
 
     /// A reference to an array whose elements are safe to dereference.
     #[derive(Debug)]
-    pub struct ArrayRef<A, L>(pub(crate) RawArrayRef<A, L>);
+    pub struct ArrayRef<'a, A: Clone, L>(pub(crate) RawArrayRef<'a, A, L>);
 
     /// Now to link these two: I'm going to implement `Deref` and `DerefMut` from an ArrayRef
     /// to its inner `RawArrayRef`.
 
-    impl<A, L> Deref for ArrayRef<A, L> {
-        type Target = RawArrayRef<A, L>;
+    impl<'a, A: Clone, L> Deref for ArrayRef<'a, A, L> {
+        type Target = RawArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
 
-    impl<A, L> DerefMut for ArrayRef<A, L> {
+    impl<'a, A: Clone, L> DerefMut for ArrayRef<'a, A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
@@ -217,8 +252,8 @@ mod arrays {
     /// The representation here is slightly different from ArrayBase
     /// in order to make it easier to implement Deref safely.
     #[derive(Debug)]
-    pub struct Array<A, L> {
-        pub(crate) meta: ArrayRef<A, L>,
+    pub struct Array<'a, A: Clone, L> {
+        pub(crate) meta: ArrayRef<'a, A, L>,
         pub(crate) cap: usize,
         pub(crate) len: usize, // This may seem redundant, but we don't know what type `L` is;
                                // we won't even require it to be bound by Layout. As a result,
@@ -228,29 +263,29 @@ mod arrays {
 
     /// A view of an existing array.
     #[derive(Debug)]
-    pub struct ArrayView<'a, A, L> {
-        pub(crate) meta: ArrayRef<A, L>,
-        pub(crate) life: PhantomData<&'a A>,
+    pub struct ArrayView<'a, 'b, A: Clone, L> {
+        pub(crate) meta: ArrayRef<'a, A, L>,
+        pub(crate) life: PhantomData<&'b A>,
     }
 
     /// A mutable view of an existing array
     #[derive(Debug)]
-    pub struct ArrayViewMut<'a, A, L> {
-        pub(crate) meta: ArrayRef<A, L>,
-        pub(crate) life: PhantomData<&'a mut A>,
+    pub struct ArrayViewMut<'a, 'b, A: Clone, L> {
+        pub(crate) meta: ArrayRef<'a, A, L>,
+        pub(crate) life: PhantomData<&'b mut A>,
     }
 
     /// A view of an array without a lifetime, and whose elements are not safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayView<A, L> {
-        pub(crate) meta: RawArrayRef<A, L>,
+    pub struct RawArrayView<'a, A: Clone, L> {
+        pub(crate) meta: RawArrayRef<'a, A, L>,
         pub(crate) life: PhantomData<*const A>,
     }
 
     /// A mutable view of an array without a lifetime, and whose elements are not safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayViewMut<A, L> {
-        pub(crate) meta: RawArrayRef<A, L>,
+    pub struct RawArrayViewMut<'a, A: Clone, L> {
+        pub(crate) meta: RawArrayRef<'a, A, L>,
         pub(crate) life: PhantomData<*mut A>,
     }
 }
@@ -271,59 +306,59 @@ mod array_deref {
         Array, ArrayRef, ArrayView, ArrayViewMut, RawArrayRef, RawArrayView, RawArrayViewMut,
     };
 
-    impl<A, L> Deref for Array<A, L> {
-        type Target = ArrayRef<A, L>;
+    impl<'a, A: Clone, L> Deref for Array<'a, A, L> {
+        type Target = ArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<A, L> DerefMut for Array<A, L> {
+    impl<'a, A: Clone, L> DerefMut for Array<'a, A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
     }
 
-    impl<'a, A, L> Deref for ArrayView<'a, A, L> {
-        type Target = ArrayRef<A, L>;
+    impl<'a, 'b, A: Clone, L> Deref for ArrayView<'a, 'b, A, L> {
+        type Target = ArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, L> Deref for ArrayViewMut<'a, A, L> {
-        type Target = ArrayRef<A, L>;
+    impl<'a, 'b, A: Clone, L> Deref for ArrayViewMut<'a, 'b, A, L> {
+        type Target = ArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, L> DerefMut for ArrayViewMut<'a, A, L> {
+    impl<'a, 'b, A: Clone, L> DerefMut for ArrayViewMut<'a, 'b, A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
     }
 
-    impl<A, L> Deref for RawArrayView<A, L> {
-        type Target = RawArrayRef<A, L>;
+    impl<'a, A: Clone, L> Deref for RawArrayView<'a, A, L> {
+        type Target = RawArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, L> Deref for RawArrayViewMut<A, L> {
-        type Target = RawArrayRef<A, L>;
+    impl<'a, A: Clone, L> Deref for RawArrayViewMut<'a, A, L> {
+        type Target = RawArrayRef<'a, A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, L> DerefMut for RawArrayViewMut<A, L> {
+    impl<'a, A: Clone, L> DerefMut for RawArrayViewMut<'a, A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
@@ -338,17 +373,17 @@ mod trait_impl {
 
     // I'll start with NdLayout:
 
-    use std::ptr::NonNull;
+    use std::{borrow::Cow, ptr::NonNull, rc::Rc, sync::Arc};
 
-    use crate::{ArrayRef, Layout, NdArray, NdLayout, RawArrayRef, RawNdArray};
+    use crate::{ptrs::ArrayPtr, ArrayRef, Layout, NdArray, NdLayout, RawArrayRef, RawNdArray};
 
-    impl<A, L: Layout> NdLayout<L> for RawArrayRef<A, L> {
+    impl<'a, A: Clone, L: Layout> NdLayout<L> for RawArrayRef<'a, A, L> {
         fn len(&self) -> usize {
             self.layout.size()
         }
     }
 
-    impl<A, L: Layout> NdLayout<L> for ArrayRef<A, L> {
+    impl<'a, A: Clone, L: Layout> NdLayout<L> for ArrayRef<'a, A, L> {
         fn len(&self) -> usize {
             self.len()
         }
@@ -356,25 +391,81 @@ mod trait_impl {
 
     // Now for RawNdArray:
 
-    impl<A, L: Layout> RawNdArray<A, L> for RawArrayRef<A, L> {
+    impl<'a, A: Clone, L: Layout> RawNdArray<A, L> for RawArrayRef<'a, A, L> {
         fn ptr(&self) -> &NonNull<A> {
-            &self.ptr
+            match &self.ptr {
+                ArrayPtr::Owned(p) => p,
+                ArrayPtr::Arc(p) => {
+                    let p = Arc::as_ptr(p) as *mut A;
+                    // SAFETY: Arc internally holds a NonNull, so getting its pointer type will never be null.
+                    &unsafe { NonNull::new_unchecked(p) }
+                }
+                ArrayPtr::Cow(p) => {
+                    let p = p.as_ref() as *const A as *mut A;
+                    // SAFETY: Refs cannot be null, so this is fine
+                    &unsafe { NonNull::new_unchecked(p) }
+                }
+                ArrayPtr::Rc(p) => {
+                    let p = p.as_ref() as *const A as *mut A;
+                    // SAFETY: Refs cannot be null, so this is fine
+                    &unsafe { NonNull::new_unchecked(p) }
+                }
+            }
         }
 
         fn ptr_mut(&mut self) -> &mut NonNull<A> {
-            &mut self.ptr
+            self.try_ensure_unique();
+            match &mut self.ptr {
+                ArrayPtr::Owned(mut p) => &mut p,
+                ArrayPtr::Arc(mut p) => {
+                    let p = Arc::get_mut(&mut p)
+                        .expect("Ensure unique should mean we can just get a mutable reference")
+                        as *mut A;
+                    &mut unsafe { NonNull::new_unchecked(p) }
+                }
+                ArrayPtr::Cow(mut p) => {
+                    let p = Cow::to_mut(&mut p) as *mut A;
+                    &mut unsafe { NonNull::new_unchecked(p) }
+                }
+                ArrayPtr::Rc(mut p) => {
+                    let p = Rc::get_mut(&mut p)
+                        .expect("Ensure unique should mean we can just get a mutable reference")
+                        as *mut A;
+                    &mut unsafe { NonNull::new_unchecked(p) }
+                }
+            }
         }
 
         fn try_ensure_unique(&mut self) {
-            todo!()
+            match &mut self.ptr {
+                ArrayPtr::Owned(p) => {}
+                ArrayPtr::Arc(mut p) => {
+                    // Existing logic for ArcRepr try_ensure_unique
+                }
+                ArrayPtr::Cow(p) => {
+                    // Existing logic for CowRepr try_ensure_unique
+                }
+                ArrayPtr::Rc(p) => {
+                    // Essentially the same logic as ArcRepr try_ensure_unique,
+                    // but for Rc instead
+                }
+            }
         }
 
         fn try_is_unique(&mut self) -> Option<bool> {
-            None
+            match &self.ptr {
+                ArrayPtr::Owned(p) => Some(true),
+                ArrayPtr::Arc(mut p) => Some(Arc::get_mut(&mut p).is_some()),
+                ArrayPtr::Cow(p) => Some(match p {
+                    Cow::Borrowed(_) => false,
+                    Cow::Owned(_) => true,
+                }),
+                ArrayPtr::Rc(p) => Some(Rc::strong_count(p) == 1),
+            }
         }
     }
 
-    impl<A, L: Layout> RawNdArray<A, L> for ArrayRef<A, L> {
+    impl<'a, A: Clone, L: Layout> RawNdArray<A, L> for ArrayRef<'a, A, L> {
         fn ptr(&self) -> &NonNull<A> {
             self.ptr()
         }
@@ -394,5 +485,5 @@ mod trait_impl {
 
     // And finally NdArray
 
-    impl<A, L: Layout> NdArray<A, L> for ArrayRef<A, L> {}
+    impl<'a, A: Clone, L: Layout> NdArray<A, L> for ArrayRef<'a, A, L> {}
 }
