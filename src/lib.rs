@@ -8,23 +8,33 @@ mod test_functions {
     //! This section is supposed to showcase what the new design can do.
     //! I put them at the top so that it's clear what I'm trying to accomplish, and check whether it compiles.
 
+    use core::fmt::Debug;
+
     use crate::{
-        Array, ArrayRef, ArrayView, ArrayViewMut, Layout, RawArrayRef, RawArrayView,
-        RawArrayViewMut,
+        Array, ArrayRef, ArrayView, ArrayViewMut, Layout, NdArray, RawArrayRef, RawArrayView,
+        RawArrayViewMut, RawNdArray,
     };
 
-    fn ergonomic_raw<A, D>(arr: &RawArrayRef<A, D>) {}
-    fn ergonomic<A, D>(arr: &ArrayRef<A, D>) {}
-    fn ergonomic_raw_mut<A, D>(arr: &mut RawArrayRef<A, D>) {}
-    fn ergonomic_mut<A, D>(arr: &mut ArrayRef<A, D>) {}
+    fn ergonomic_raw<A, L: Layout>(arr: &RawArrayRef<A, L>) {
+        println!("{:?}", arr.ptr());
+    }
+    fn ergonomic<A: Debug, L: Layout>(arr: &ArrayRef<A, L>) {
+        println!("{:?}", arr.first());
+    }
+    fn ergonomic_raw_mut<A, L: Layout>(arr: &mut RawArrayRef<A, L>) {
+        println!("{:?}", arr.ptr_mut());
+    }
+    fn ergonomic_mut<A: Debug, L: Layout>(arr: &mut ArrayRef<A, L>) {
+        println!("{:?}", arr.first_mut());
+    }
 
     /// Scaffolding to call the above functions; arguments are move to simulate fully-owned values.
-    fn caller<A, D: Layout>(
-        mut arr: Array<A, D>,
-        arr_view: ArrayView<A, D>,
-        mut arr_view_mut: ArrayViewMut<A, D>,
-        raw_view: RawArrayView<A, D>,
-        mut raw_view_mut: RawArrayViewMut<A, D>,
+    fn caller<A, L: Layout>(
+        mut arr: Array<A, L>,
+        arr_view: ArrayView<A, L>,
+        mut arr_view_mut: ArrayViewMut<A, L>,
+        raw_view: RawArrayView<A, L>,
+        mut raw_view_mut: RawArrayViewMut<A, L>,
     ) {
         ergonomic_raw(&arr);
         ergonomic(&arr);
@@ -89,7 +99,7 @@ mod trait_defs {
     }
 
     /// A trait for shape- and stride- related functions.
-    pub trait NdLayout<D> {
+    pub trait NdLayout<L> {
         fn len(&self) -> usize;
 
         fn is_empty(&self) -> bool {
@@ -102,7 +112,7 @@ mod trait_defs {
     /// To implement this trait, the functions `ptr` and `ptr_mut` must return references to the
     /// NonNull that points to the "head" of that array's data. The implementation must also provide
     /// methods for attempting to check or ensure uniqueness.
-    pub trait RawNdArray<A, D>: NdLayout<D> {
+    pub trait RawNdArray<A, L>: NdLayout<L> {
         fn ptr(&self) -> &NonNull<A>;
 
         fn ptr_mut(&mut self) -> &mut NonNull<A>;
@@ -122,7 +132,7 @@ mod trait_defs {
     }
 
     /// A trait for functions that can only operate safely on array data that is safely dereferencable.
-    trait NdArray<A, D>: RawNdArray<A, D> {
+    pub trait NdArray<A, L>: RawNdArray<A, L> {
         fn first(&self) -> Option<&A> {
             if self.is_empty() {
                 None
@@ -155,27 +165,27 @@ mod array_refs {
 
     /// A reference to an array whose elements may not be safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayRef<A, D> {
-        pub(crate) layout: D,
+    pub struct RawArrayRef<A, L> {
+        pub(crate) layout: L,
         pub(crate) ptr: NonNull<A>,
     }
 
     /// A reference to an array whose elements are safe to dereference.
     #[derive(Debug)]
-    pub struct ArrayRef<A, D>(pub(crate) RawArrayRef<A, D>);
+    pub struct ArrayRef<A, L>(pub(crate) RawArrayRef<A, L>);
 
     /// Now to link these two: I'm going to implement `Deref` and `DerefMut` from an ArrayRef
     /// to its inner `RawArrayRef`.
 
-    impl<A, D> Deref for ArrayRef<A, D> {
-        type Target = RawArrayRef<A, D>;
+    impl<A, L> Deref for ArrayRef<A, L> {
+        type Target = RawArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
 
-    impl<A, D> DerefMut for ArrayRef<A, D> {
+    impl<A, L> DerefMut for ArrayRef<A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
@@ -196,7 +206,7 @@ mod arrays {
     //!
     //! You'll notice that the definitions are largely similar, and do not seem to inherently limit
     //! the mutability or data dereference safety of their particular representations.
-    //! See ARRAY DEREFERENCING for how this is accomplished.
+    //! See [`crate::array_deref`] for how this is accomplished.
 
     use std::marker::PhantomData;
 
@@ -207,40 +217,40 @@ mod arrays {
     /// The representation here is slightly different from ArrayBase
     /// in order to make it easier to implement Deref safely.
     #[derive(Debug)]
-    pub struct Array<A, D> {
-        pub(crate) meta: ArrayRef<A, D>,
+    pub struct Array<A, L> {
+        pub(crate) meta: ArrayRef<A, L>,
         pub(crate) cap: usize,
-        pub(crate) len: usize, // This may seem redundant, but we don't know what type `D` is;
-                               // we won't even require it to be bound by Dimension. As a result,
+        pub(crate) len: usize, // This may seem redundant, but we don't know what type `L` is;
+                               // we won't even require it to be bound by Layout. As a result,
                                // we need to manually keep track of the "length" of elements in the array,
                                // even though this information is redundant with the layout in `ArrayRef`.
     }
 
     /// A view of an existing array.
     #[derive(Debug)]
-    pub struct ArrayView<'a, A, D> {
-        pub(crate) meta: ArrayRef<A, D>,
+    pub struct ArrayView<'a, A, L> {
+        pub(crate) meta: ArrayRef<A, L>,
         pub(crate) life: PhantomData<&'a A>,
     }
 
     /// A mutable view of an existing array
     #[derive(Debug)]
-    pub struct ArrayViewMut<'a, A, D> {
-        pub(crate) meta: ArrayRef<A, D>,
+    pub struct ArrayViewMut<'a, A, L> {
+        pub(crate) meta: ArrayRef<A, L>,
         pub(crate) life: PhantomData<&'a mut A>,
     }
 
     /// A view of an array without a lifetime, and whose elements are not safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayView<A, D> {
-        pub(crate) meta: RawArrayRef<A, D>,
+    pub struct RawArrayView<A, L> {
+        pub(crate) meta: RawArrayRef<A, L>,
         pub(crate) life: PhantomData<*const A>,
     }
 
     /// A mutable view of an array without a lifetime, and whose elements are not safe to dereference.
     #[derive(Debug)]
-    pub struct RawArrayViewMut<A, D> {
-        pub(crate) meta: RawArrayRef<A, D>,
+    pub struct RawArrayViewMut<A, L> {
+        pub(crate) meta: RawArrayRef<A, L>,
         pub(crate) life: PhantomData<*mut A>,
     }
 }
@@ -261,59 +271,59 @@ mod array_deref {
         Array, ArrayRef, ArrayView, ArrayViewMut, RawArrayRef, RawArrayView, RawArrayViewMut,
     };
 
-    impl<A, D> Deref for Array<A, D> {
-        type Target = ArrayRef<A, D>;
+    impl<A, L> Deref for Array<A, L> {
+        type Target = ArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<A, D> DerefMut for Array<A, D> {
+    impl<A, L> DerefMut for Array<A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
     }
 
-    impl<'a, A, D> Deref for ArrayView<'a, A, D> {
-        type Target = ArrayRef<A, D>;
+    impl<'a, A, L> Deref for ArrayView<'a, A, L> {
+        type Target = ArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, D> Deref for ArrayViewMut<'a, A, D> {
-        type Target = ArrayRef<A, D>;
+    impl<'a, A, L> Deref for ArrayViewMut<'a, A, L> {
+        type Target = ArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, D> DerefMut for ArrayViewMut<'a, A, D> {
+    impl<'a, A, L> DerefMut for ArrayViewMut<'a, A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
     }
 
-    impl<A, D> Deref for RawArrayView<A, D> {
-        type Target = RawArrayRef<A, D>;
+    impl<A, L> Deref for RawArrayView<A, L> {
+        type Target = RawArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, D> Deref for RawArrayViewMut<A, D> {
-        type Target = RawArrayRef<A, D>;
+    impl<'a, A, L> Deref for RawArrayViewMut<A, L> {
+        type Target = RawArrayRef<A, L>;
 
         fn deref(&self) -> &Self::Target {
             &self.meta
         }
     }
 
-    impl<'a, A, D> DerefMut for RawArrayViewMut<A, D> {
+    impl<'a, A, L> DerefMut for RawArrayViewMut<A, L> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.meta
         }
@@ -330,15 +340,15 @@ mod trait_impl {
 
     use std::ptr::NonNull;
 
-    use crate::{ArrayRef, Layout, NdLayout, RawArrayRef, RawNdArray};
+    use crate::{ArrayRef, Layout, NdArray, NdLayout, RawArrayRef, RawNdArray};
 
-    impl<A, D: Layout> NdLayout<D> for RawArrayRef<A, D> {
+    impl<A, L: Layout> NdLayout<L> for RawArrayRef<A, L> {
         fn len(&self) -> usize {
             self.layout.size()
         }
     }
 
-    impl<A, D: Layout> NdLayout<D> for ArrayRef<A, D> {
+    impl<A, L: Layout> NdLayout<L> for ArrayRef<A, L> {
         fn len(&self) -> usize {
             self.len()
         }
@@ -346,7 +356,7 @@ mod trait_impl {
 
     // Now for RawNdArray:
 
-    impl<A, D: Layout> RawNdArray<A, D> for RawArrayRef<A, D> {
+    impl<A, L: Layout> RawNdArray<A, L> for RawArrayRef<A, L> {
         fn ptr(&self) -> &NonNull<A> {
             &self.ptr
         }
@@ -364,7 +374,7 @@ mod trait_impl {
         }
     }
 
-    impl<A, D: Layout> RawNdArray<A, D> for ArrayRef<A, D> {
+    impl<A, L: Layout> RawNdArray<A, L> for ArrayRef<A, L> {
         fn ptr(&self) -> &NonNull<A> {
             self.ptr()
         }
@@ -381,4 +391,8 @@ mod trait_impl {
             self.try_is_unique()
         }
     }
+
+    // And finally NdArray
+
+    impl<A, L: Layout> NdArray<A, L> for ArrayRef<A, L> {}
 }
