@@ -9,13 +9,15 @@ use std::ptr::NonNull;
 
 use crate::core::{ArrayRef, Layout, NdArray, NdLayout, RawArrayRef, RawNdArray};
 
-impl<A, L: Layout> NdLayout<L> for RawArrayRef<A, L> {
+use super::{ArrayRefBase, RawArrayRefBase};
+
+impl<A, L: Layout, P> NdLayout<L> for RawArrayRefBase<A, L, P> {
     fn len(&self) -> usize {
         self.layout.size()
     }
 }
 
-impl<A, L: Layout> NdLayout<L> for ArrayRef<A, L> {
+impl<A, L: Layout, P> NdLayout<L> for ArrayRefBase<A, L, P> {
     fn len(&self) -> usize {
         self.0.len()
     }

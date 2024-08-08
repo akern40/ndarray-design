@@ -13,16 +13,12 @@
 //! the mutability or data dereference safety of their particular representations.
 //! See [`crate::array_deref`] for how this is accomplished.
 
-use crate::core::{ArrayRef, RawArrayRef};
-use std::marker::PhantomData;
+use crate::core::{ArrayRef, ArrayRefBase, RawArrayRef};
+use std::{marker::PhantomData, ptr::NonNull, sync::Arc};
 
-/// An owned array.
-///
-/// The representation here is slightly different from ArrayBase
-/// in order to make it easier to implement Deref safely.
 #[derive(Debug)]
-pub struct Array<A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
+pub struct ArrayBase<A, L, P = NonNull<A>> {
+    pub(crate) meta: ArrayRefBase<A, L, P>,
     pub(crate) cap: usize,
     pub(crate) len: usize, // This may seem redundant, but we don't know what type `L` is;
                            // we won't even require it to be bound by Layout. As a result,
@@ -30,19 +26,27 @@ pub struct Array<A, L> {
                            // even though this information is redundant with the layout in `ArrayRef`.
 }
 
+type Array<A, L> = ArrayBase<A, L>;
+type ArcArray<A, L> = ArrayBase<A, L, Arc<A>>;
+
 /// A view of an existing array.
 #[derive(Debug)]
-pub struct ArrayView<'a, A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
+pub struct ArrayViewBase<'a, A, L, P = NonNull<A>> {
+    pub(crate) meta: ArrayRefBase<A, L, P>,
     pub(crate) life: PhantomData<&'a A>,
 }
 
 /// A mutable view of an existing array
 #[derive(Debug)]
-pub struct ArrayViewMut<'a, A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
+pub struct ArrayViewBaseMut<'a, A, L, P = NonNull<A>> {
+    pub(crate) meta: ArrayRefBase<A, L, P>,
     pub(crate) life: PhantomData<&'a mut A>,
 }
+
+type ArrayView<'a, A, L> = ArrayViewBase<'a, A, L>;
+type ArrayViewMut<'a, A, L> = ArrayViewBaseMut<'a, A, L>;
+type ArcArrayView<'a, A, L> = ArrayViewBase<'a, A, L, Arc<A>>;
+type ArcArrayViewMut<'a, A, L> = ArrayViewBaseMut<'a, A, L, Arc<A>>;
 
 /// A view of an array without a lifetime, and whose elements are not safe to dereference.
 #[derive(Debug)]
