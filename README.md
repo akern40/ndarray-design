@@ -3,8 +3,8 @@
 Disclaimer: This README is not official for `ndarray`.
 Its aim is to articulate, as clearly as possible, some design principles and goals that might be achieved through a redesign of `ndarray`'s core.
 
-Second Disclaimer: This design document tries to build up an understanding of `ndarray`'s (potential) design from first principles, as a sort of pedagogical exercise.
-In reality, every idea in this document is actually the cumulation of years of design work, conversation, and thinking, in particular by [bluss](https://github.com/bluss), [Jim Turner](https://github.com/jturner314), [Vincent Barrielle](https://github.com/vbarrielle), and [Luca Palmieri](https://github.com/LukeMathWalker). And that's not an exhaustive list! (Names pulled from contributions and discussions on the `ndarray` GitHub page).
+Second Disclaimer: This design document tries to build an understanding of `ndarray`'s (potential) design from first principles, as a sort of pedagogical exercise.
+But the ideas in this document are the culmination of years of design, dialogue, and development, in particular by [bluss](https://github.com/bluss), [Jim Turner](https://github.com/jturner314), [Vincent Barrielle](https://github.com/vbarrielle), and [Luca Palmieri](https://github.com/LukeMathWalker)[^0].
 
 ## `ndarray` as a Multi-Dimensional Vec and Slice
 Fundamentally, we might think of `ndarray`'s core aspiration as providing data structures that are multi-dimensional generalizations of Rust's standard `Vec<T>` and `&[T]`: a block of data with some information describing its "shape" (rather than just its length).
@@ -83,7 +83,7 @@ The idea is to have one kind of type that acts as the owning data structure, and
 
 As we get a solid idea of some fundamentals for `ndarray`'s design, I'll call them out like this:
 > [!TIP]
-> `ndarray` should have some concept of an "owning" structure and some concept of a "referencing" structure. The referencing structure should carry information abou the lifetime and mutability of the data.
+> `ndarray` should have some concept of an "owning" structure and some concept of a "referencing" structure. The referencing structure should carry information about the lifetime and mutability of the data.
 
 There's another idea we want to borrow from the `Vec`/`[T]` duo: [`Deref` implementations](https://doc.rust-lang.org/beta/book/ch15-02-deref.html).
 The [Array Reference Type RFC](https://github.com/rust-ndarray/ndarray/issues/879) on GitHub[^4] by Jim Turner makes several good arguments that `ndarray`'s owning data type should implement `Deref` with the referencing type as its target.
@@ -106,7 +106,7 @@ So we'll jot that down as our second design idea:
 > So, dear reader, please provide feedback!
 
 What else can we steal from our dynamic duo?
-Well, we just went into depth about how slices are just pointers, i.e., *~raw pointers~*[^5].
+Well, we just went into depth about how slices are just pointers, i.e., *\~raw pointers\~*[^5].
 This is important because raw pointers let us do some important tricks that can be otherwise difficult to accomplish, like messing with lifetimes and getting aliasing pointers.
 This turns out to be pretty beneficial for implementing functions like splitting arrays in half.
 Unfortunately, without custom DSTs, we can't get actual raw pointers.
@@ -118,6 +118,7 @@ Here's where I'll introduce our last Alert convention: design questions that I c
 > I think this is most open because it's not 100% clear to me precisely what functionality this enables over just the regular reference type.
 > Please provide feedback here!
 
+[^0]: And that's not an exhaustive list! Names pulled from contributions and discussions on the `ndarray` GitHub page.
 [^1]: An experimental API, so stable Rust is actually cheating here.
 [^2]: Cue the [Zelda cooking sound](https://www.youtube.com/watch?v=-Bl6xL2it4w).
 [^3]: The `ptr_metadata` experimental API starts to get there, but is still on nightly.
