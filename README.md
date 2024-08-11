@@ -106,17 +106,61 @@ So we'll jot that down as our second design idea:
 > So, dear reader, please provide feedback!
 
 What else can we steal from our dynamic duo?
-Well, we just went into depth about how slices are just pointers, i.e., *\~raw pointers\~*[^5].
+Well, we just went into depth about how slices are just pointers.
+So what about *\~raw pointers\~*[^5].
 This is important because raw pointers let us do some important tricks that can be otherwise difficult to accomplish, like messing with lifetimes and getting aliasing pointers.
 This turns out to be pretty beneficial for implementing functions like splitting arrays in half.
 Unfortunately, without custom DSTs, we can't get actual raw pointers.
 So what to do?
-Here's where I'll introduce our last Alert convention: design questions that I consider particularly open.
+Here's where I'll introduce our last formatting convention: design questions that I consider particularly open.
 > [!IMPORTANT]
 > Should there be a third data structure that represents a "raw pointer array"?
 > Stripped of lifetime information, this would act more like a `*const T` or `*mut T` than a `&[T]` or `&mut [T]`.
 > I think this is most open because it's not 100% clear to me precisely what functionality this enables over just the regular reference type.
 > Please provide feedback here!
+
+### References, Views, and C++'s `mdspan`
+For those familiar with `ndarray`'s existing codebase / design, you'll know that "views" play a large role in both the library and its use.
+These views represent non-owning looks into a multidimensional array.
+
+Which sounds suspiciously like the reference type described above.
+
+So should `ndarray` get rid of views and just use the reference type?
+This design has a certain cleanliness to it: having both a reference type and a view can be a confusing API - users now have to learn the difference between two types of non-ownership - and may only be worth keeping if there are critical differences between the two.
+
+As this section progresses, it's worth noting that C++ just had its first multi-dimensional array construct accepted into `std` in C++23.
+The new [`std::mdspan`](https://en.cppreference.com/w/cpp/container/mdspan) takes the stance that there should be just one type of non-owning multi-dimensional array.
+We'll be revisiting parts of its design, which I personally think is very well thought out, as we continue to build up our `ndarray` internals.
+
+To understand the design trade-offs with combining the concept of a "view" and a "reference", we have to look at fat pointers, `Deref`, mutability, and lifetimes:
+
+#### Lack of Fat Pointers
+Fat pointers have a number of advantages in a design of this kind, but one of them is the critical fact that Rust lets us pass around pointers (both thin and fat) as values without lifetimes.
+This means that a function can build a fat pointer in its body, and return it as a reference to the constructed type with the proper lifetime attached.
+This is what happens with the call chain of `from_raw_parts` above, just in multiple steps.
+
+For `ndarray`, this limitation has a major consequence: you can't write a function that returns a *reference* to a non-owning type *that doesn't have the same shape and offset as the owning type*.
+In other words, this signature:
+```rust
+fn same_shape<'a>(owner: &'a OwningType) -> &'a ReferenceType;
+```
+is only possible when `OwningType` and `ReferenceType` view the exact same data.
+This is exactly what we want for `Deref`, but it's a big problem when we want to return a non-owning array that has a different shape, stride, or offset, say from the result of slicing.
+For that behavior, we'd have to have a signature like
+```rust
+fn slice<'a>(owner: &'a OwningType) -> ReferenceType;
+```
+... but hold on.
+Where'd the lifetime `'a` go?
+
+#### Lifetimes
+Unlike in C++, Rust must explicitly carry around the lifetimes of its values.
+So, as we mentioned above, a reference type must carry around the lifetime of the array it's referencing.
+Going back to our `Vec<T>` / `&[T]` example, this is accomplished via the lifetime of the borrow: a `Vec` with lifetime `'a` will produce a slice with type `&'a [T]`.
+The same happens with a `deref`, or the `same_shape` example above.
+
+But once we start insisting on only one non-owning type, it becomes clear that (unlike for slices), we're going to have non-reference values of that type!
+To make it concrete: `[T]` is exceedingly rare to see, with `&[T]` being the norm, but `ReferenceType` would have to be part of everyday use.
 
 [^0]: And that's not an exhaustive list! Names pulled from contributions and discussions on the `ndarray` GitHub page.
 [^1]: An experimental API, so stable Rust is actually cheating here.
