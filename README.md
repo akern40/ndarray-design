@@ -83,7 +83,7 @@ The idea is to have one kind of type that acts as the owning data structure, and
 
 As we get a solid idea of some fundamentals for `ndarray`'s design, I'll call them out like this:
 > [!TIP]
-> `ndarray` should have some concept of an "owning" structure and some concept of a "referencing" structure. The referencing structure should carry information about the lifetime and mutability of the data.
+> `ndarray` should have some concept of an "owning" structure and some concept of a "referencing" structure.
 
 There's another idea we want to borrow from the `Vec`/`[T]` duo: [`Deref` implementations](https://doc.rust-lang.org/beta/book/ch15-02-deref.html).
 The [Array Reference Type RFC](https://github.com/rust-ndarray/ndarray/issues/879) on GitHub[^4] by Jim Turner makes several good arguments that `ndarray`'s owning data type should implement `Deref` with the referencing type as its target.
@@ -132,7 +132,7 @@ As this section progresses, it's worth noting that C++ just had its first multi-
 The new [`std::mdspan`](https://en.cppreference.com/w/cpp/container/mdspan) takes the stance that there should be just one type of non-owning multi-dimensional array.
 We'll be revisiting parts of its design, which I personally think is very well thought out, as we continue to build up our `ndarray` internals.
 
-To understand the design trade-offs with combining the concept of a "view" and a "reference", we have to look at fat pointers, `Deref`, mutability, and lifetimes:
+To understand the design trade-offs with combining the concept of a "view" and a "reference", we have to look at fat pointers, `Deref`, and lifetimes:
 
 #### Lack of Fat Pointers
 Fat pointers have a number of advantages in a design of this kind, but one of them is the critical fact that Rust lets us pass around pointers (both thin and fat) as values without lifetimes.
@@ -142,7 +142,7 @@ This is what happens with the call chain of `from_raw_parts` above, just in mult
 For `ndarray`, this limitation has a major consequence: you can't write a function that returns a *reference* to a non-owning type *that doesn't have the same shape and offset as the owning type*.
 In other words, this signature:
 ```rust
-fn same_shape<'a>(owner: &'a OwningType) -> &'a ReferenceType;
+fn deref<'a>(owner: &'a OwningType) -> &'a ReferenceType;
 ```
 is only possible when `OwningType` and `ReferenceType` view the exact same data.
 This is exactly what we want for `Deref`, but it's a big problem when we want to return a non-owning array that has a different shape, stride, or offset, say from the result of slicing.
@@ -161,6 +161,103 @@ The same happens with a `deref`, or the `same_shape` example above.
 
 But once we start insisting on only one non-owning type, it becomes clear that (unlike for slices), we're going to have non-reference values of that type!
 To make it concrete: `[T]` is exceedingly rare to see, with `&[T]` being the norm, but `ReferenceType` would have to be part of everyday use.
+This is why `ndarray`'s existing `ArrayView` is generic on the lifetime: it acts _as if_ it's carrying a reference to the array into which it's peering.
+
+So that's one option: change `ReferenceType` to be generic on lifetime (it's already going to need several other generics; we'll get to that later):
+```rust
+fn deref<'a>(owner: &'a OwningType) -> &'a ReferenceType<'a>;
+fn slice<'a>(owner: &'a OwningType) -> ReferenceType<'a>;
+```
+... except that `deref` function signature is impossible: the `Deref` implementation would have to be
+```rust
+impl<'a> Deref for OwningType {
+    type Target = ReferenceType<'a>;
+
+    fn deref(owner: &OwningType) -> &ReferenceType<'a> {
+        todo!();
+    }
+}
+```
+which leads to `'a` being an unconstrained lifetime parameter, which the Rust compiler will inform you is not allowed.
+
+So, until custom DSTs and fat pointers are possible, `ndarray` must continue to have both a reference type and a separate view type.
+
+> [!TIP]
+> `ndarray` must define a non-owning view type which can represent a look into a subset of an owning type, reference type, or another view type.
+The view type must carry the appropriate lifetime and mutability information of the array from which is received its data.
+Like the owning type, the view type should `deref` to the reference type.
+
+In practice, since carrying mutability information around is a different type, `ndarray` does (and likely will continue to) have both an `ArrayView` and an `ArrayViewMut`.
+
+### Mutability
+The final topic in our `Vec` / slice analogy is mutability.
+In the following signature:
+```rust
+fn mutate(slice: &mut [f64]);
+```
+the `mut` indicates that the function can (and probably will) muck around with the underlying data contained in the slice.
+The function cannot, however, change the number of elements the slice refers to.
+Maybe this is by design, but maybe not: the slice's status as a fat pointer means that the length is part of pointer metadata.
+I'm not even sure what the rules are on the mutability of pointer metadata.
+
+So how does this analogy extend to `ndarray`?
+It seems that the most important question is whether
+```rust
+fn mutate(arr: &mut ReferenceType);
+```
+can mutate *both* the array data *and* the array shape, or *only* the array data.
+The analogy to `&mut [T]` would imply the latter, but I think there's a very good argument for the former.
+Up until now, we have established three types: owning, view, and reference types.
+And we've established that both the owning and view types should `deref` to the reference type.
+One of the major goals of that design is allowing users to write functions that operate on arrays using just the reference type as the input argument.
+So what happens if users want to write a function that alters the shape of an array, in place?
+Well, if the reference type only allows for data mutability, then users will have to write two functions:
+```rust
+fn mutate_owned(arr: &mut OwningType);
+fn mutate_view(arr: &mut ViewType);
+```
+In the current `ndarray` design (0.16.1), this isn't a problem, since the owning type and the view type are both generic instantiations of `ArrayBase`, so only one function is needed.
+However, I'd argue that keeping this kind of API would be even more confusing to users.
+For reasons I'll discuss later, we already expect the owning, view, and reference types to have three generic parameters.
+Keeping an `ArrayBase` concept that encompasses both the owning type and the view type would require a *fourth* generic, and the function signature would look like
+```rust
+fn mutate_base<T, S, D, A>(arr: &mut ArrayBase<T, S, D, A>);
+```
+where `T` is the "type" of array it is (owning or view), `S` is the storage (different from `ndarray`'s current storage concept, see below), `D` is the dimensionality, and `A` is the element type.
+And god forbid they should want to write such a function that has more than one argument.
+
+Instead, I'd suggest that the reference type allows for mutability of both data and shape.
+If the reference type is `deref`'d from an owning type, then the function will change the owning type in-place.
+If the reference type is `deref`'d from a view type, then the function will change the view's shape without changing the underlying owning type behind it.
+It creates simple rules for function writers to follow: take in `&ReferenceType` to read the array, and `&mut ReferenceType` to write the array.
+It also create simple rules for function consumers: if you call a mutable function on an owning type, expect that owning type to be changed.
+If you call a mutable function on a view type, expect that view type to be changed.
+
+> [!IMPORTANT]
+> Should the mutability of array views and array references be different?
+> In particular, should they share the same rules for mutability of both data and shape?
+> What considerations have I missed here?
+
+## Generic Parameters and C++23's `mdspan`
+Ok, so we've gone through the parallels between `Vec`s and arrays and seen what the consequences are for our designs.
+However, there's one place where the parallels totally break down: arrays are not just generic in type, but also in dimensionality (at least).
+So we've already got two generics, `A`, and `D`.
+
+`ndarray` currently (0.16.1) has a third generic parameter, `S`, for "storage".
+At the moment, that storage type serves to pack three concepts into `ArrayBase`: "raw" array types, view types, and shared array data via `Arc`.
+I'd like to argue that while the storage generic has an important place, the current implementation packs in too many ideas.
+In particular, the fact that an array is a view should not be considered part of storage, and should instead be handled by a separate struct.
+
+The storage type would then be free to implement something closer to `mdspan`'s `AccessorPolicy`.
+In that design, the `LayoutPolicy` (which would likely be the `D` generic type here) is responsible for turning an index into a linear offset from the "origin" or "start" of the array (or array view).
+If `D` played that role in `ndarray`, then the storage type could act like `AccessorPolicy`, responsible for turning that linear offset into a reference for the correct position in the array.
+
+I should be clear that a complete copy of `mdspan` is neither possible nor desirable; it's a standard designed for C++, and will not translate to idiomatic Rust on a 1:1 basis.
+But I do think that the separation of "index to offset" and "offset to reference" is a smart design.
+
+> [!IMPORTANT]
+> Is following `mdspan`'s design ill-advised?
+> If it is a good idea, what should the specifics of the traits be that enable / enforce that design?
 
 [^0]: And that's not an exhaustive list! Names pulled from contributions and discussions on the `ndarray` GitHub page.
 [^1]: An experimental API, so stable Rust is actually cheating here.
