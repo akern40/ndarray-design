@@ -9,67 +9,8 @@ But the ideas in this document are the culmination of years of design, dialogue,
 ## `ndarray` as a Multi-Dimensional Vec and Slice
 Fundamentally, we might think of `ndarray`'s core aspiration as providing data structures that are multi-dimensional generalizations of Rust's standard `Vec<T>` and `&[T]`: a block of data with some information describing its "shape" (rather than just its length).
 So this design document will start there.
-Before we go any further, it's worth emphasizing precisely what those types are, and the slice type in particular, because understanding those details will be important for understanding the art of the possible with `ndarray`.
-If you're already comfortable with Dynamically Sized Types and fat pointers, you can skip to [the next section](#lets-just-copy-vec-and-slice).
-
-### A Totally Inadequate Primer on Rust's Slices
-Ok, so what's going on with slices?
-We know them, we love them, and I absolutely did not understand them until I started thinking about `ndarray`'s internals.
-The slice is a [*dynamically sized type*](https://doc.rust-lang.org/reference/dynamically-sized-types.html), and a reference to a slice is known as a "fat pointer".
-And [what is a "fat pointer"](https://stackoverflow.com/questions/57754901/what-is-a-fat-pointer)?
-It's a pointer, plus some additional information about that pointer, that still looks and acts like a pointer.
-
-... Ok, so that sentence is all well and good, but to be honest it didn't really click with me when I read it for the first time.
-Or the second time.
-Or really ever.
-So I embarked on a hunt of Rust's own code to learn about the birds and the bees of slices: how are they born?
-I found a method that claimed to create one from thin air ([`std::slice::from_raw_parts`](https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html)) and went from there:
-```rust
-pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
-    unsafe {
-        // ...
-        // Some safety stuff we don't care about right now...
-        // ...
-        &*ptr::slice_from_raw_parts(data, len)
-    }
-}
-```
-Ok, so far so good: we want a slice, we know where the data lies (`data`) and the amount of data we have (`len`) and we call a function that gives us a slice that we dereference and then borrow.
-So what's that [`slice_from_raw_parts`](https://doc.rust-lang.org/stable/std/ptr/fn.slice_from_raw_parts.html) doing?
-```rust
-pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
-    from_raw_parts(data, len)
-}
-```
-It's... a wrapper.
-That returns a pointer to a slice.
-Kinda disappointing, huh?
-But what's this `from_raw_parts`, then?
-How did we **make** that slice?
-We all know we "cannot return value referencing local variable" [[1](https://stackoverflow.com/questions/32682876/is-there-any-way-to-return-a-reference-to-a-variable-created-in-a-function), [2](https://stackoverflow.com/questions/43079077/proper-way-to-return-a-new-string-in-rust), [3](https://stackoverflow.com/questions/29428227/return-local-string-as-a-slice-str), [4](https://stackoverflow.com/questions/32300132/why-cant-i-store-a-value-and-a-reference-to-that-value-in-the-same-struct)] because the Rust compiler has yelled at us so many times about it.
-So how on God's Green Earth did the Rust language itself just return a pointer to a slice that was created in a local function?
-Is it cheating?
-Divine intervention?
-I had to know.
-
-So let's look at [`from_raw_parts`](https://doc.rust-lang.org/std/ptr/fn.from_raw_parts.html)[^1]:
-```rust
-pub const fn from_raw_parts<T: ?Sized>(
-    data_pointer: *const impl Thin,
-    metadata: <T as Pointee>::Metadata,
-) -> *const T { // <-- Shouldn't this be a *const [T]??
-    // Intrinsics magic
-}
-```
-When I saw this definition my head spun.
-This `from_raw_parts` function returns... a pointer to `T`?
-A plain old pointer?
-But then how does `slice_from_raw_parts`, without any additional magic, return a pointer to a *slice*?
-Where did the *slice* come from?
-
-And that's when it clicked: a slice *is a pointer*.
-A *fat* pointer, which "magically" contains the length of the data within the pointer type itself.
-Rust performs a perfectly legal type cast when it calls that final function, switching the return type on you, but `&[T]` is synctactic sugar for a `*const T` with some metadata packed in there.
+Before you read further, make sure to familiarize yourself with the details of slices, especially their roles as Dynamically Sized Types and the concepts of fat pointers.
+I've left code walkthrough that helped me think about this at the [bottom of the document](#a-totally-inadequate-primer-on-rusts-slices), but feel free to just keep going from here.
 
 ### Let's Just Copy Vec and Slice
 Alright, so we know that a slice is a DST, a reference to a slice is a fat pointer, and `Vec`s own and manage the memory that slices point to.
@@ -86,10 +27,10 @@ As we get a solid idea of some fundamentals for `ndarray`'s design, I'll call th
 > `ndarray` should have some concept of an "owning" structure and some concept of a "referencing" structure.
 
 There's another idea we want to borrow from the `Vec`/`[T]` duo: [`Deref` implementations](https://doc.rust-lang.org/beta/book/ch15-02-deref.html).
-The [Array Reference Type RFC](https://github.com/rust-ndarray/ndarray/issues/879) on GitHub[^4] by Jim Turner makes several good arguments that `ndarray`'s owning data type should implement `Deref` with the referencing type as its target.
+Jim Turner's [Array Reference Type RFC](https://github.com/rust-ndarray/ndarray/issues/879)[^4] makes several good arguments for `ndarray`'s owning data type implementing `Deref` with the referencing type as its target.
 The RFC has a lot of rich detail, but I'd like to pull out what I think are the three best arguments for this design:
 1. Integration into the Rust ecosystem by analogy to other smart pointer types
-2. Expression of function arguments (although we'll get back to that later)
+2. Expression of function arguments (this will come up later)
 3. In-place arithmetic operators
 
 If we're using the referencing type as a function argument, that means we'd like to have most capability implemented on the reference type, rather than the owning type.
@@ -98,21 +39,21 @@ So we'll jot that down as our second design idea:
 > The owning data structure must dereference to a referencing data structure.
 > Whenever possible, functionality should be implemented on the reference type rather than the owning type.
 
-> [!WARNING]
+<!-- > [!WARNING]
 > Notice the word *must* in the design tip above.
 > That little choice will have some major implications later in this design document, especially when it comes to discussing traits.
 > But I want to stress that it's just that: a choice.
 > This document is a proposal, of sorts, but I am 100% positive that at least one of the choices this document makes will be wrong.
-> So, dear reader, please provide feedback!
+> So, dear reader, please provide feedback! -->
 
 What else can we steal from our dynamic duo?
-Well, we just went into depth about how slices are just pointers.
+Well, we slices are just pointers.
 So what about *\~raw pointers\~*[^5].
-This is important because raw pointers let us do some important tricks that can be otherwise difficult to accomplish, like messing with lifetimes and getting aliasing pointers.
+Raw pointers let us do some important tricks that can be otherwise difficult to accomplish, like messing with lifetimes and getting aliasing pointers.
 This turns out to be pretty beneficial for implementing functions like splitting arrays in half.
 Unfortunately, without custom DSTs, we can't get actual raw pointers.
 So what to do?
-Here's where I'll introduce our last formatting convention: design questions that I consider particularly open.
+Here's where I'll introduce another formatting convention: design questions that I consider particularly open.
 > [!IMPORTANT]
 > Should there be a third data structure that represents a "raw pointer array"?
 > Stripped of lifetime information, this would act more like a `*const T` or `*mut T` than a `&[T]` or `&mut [T]`.
@@ -137,7 +78,7 @@ To understand the design trade-offs with combining the concept of a "view" and a
 #### Lack of Fat Pointers
 Fat pointers have a number of advantages in a design of this kind, but one of them is the critical fact that Rust lets us pass around pointers (both thin and fat) as values without lifetimes.
 This means that a function can build a fat pointer in its body, and return it as a reference to the constructed type with the proper lifetime attached.
-This is what happens with the call chain of `from_raw_parts` above, just in multiple steps.
+(This is what happens with the call chain of `from_raw_parts` in the slice primer below, just in multiple steps.)
 
 For `ndarray`, this limitation has a major consequence: you can't write a function that returns a *reference* to a non-owning type *that doesn't have the same shape and offset as the owning type*.
 In other words, this signature:
@@ -155,9 +96,8 @@ Where'd the lifetime `'a` go?
 
 #### Lifetimes
 Unlike in C++, Rust must explicitly carry around the lifetimes of its values.
-So, as we mentioned above, a reference type must carry around the lifetime of the array it's referencing.
 Going back to our `Vec<T>` / `&[T]` example, this is accomplished via the lifetime of the borrow: a `Vec` with lifetime `'a` will produce a slice with type `&'a [T]`.
-The same happens with a `deref`, or the `same_shape` example above.
+The same happens with a `deref` to the reference type, above.
 
 But once we start insisting on only one non-owning type, it becomes clear that (unlike for slices), we're going to have non-reference values of that type!
 To make it concrete: `[T]` is exceedingly rare to see, with `&[T]` being the norm, but `ReferenceType` would have to be part of everyday use.
@@ -179,8 +119,9 @@ impl<'a> Deref for OwningType {
 }
 ```
 which leads to `'a` being an unconstrained lifetime parameter, which the Rust compiler will inform you is not allowed.
+So a lifetime-generic reference type fails to meet one of our first criteria: being the `Deref` target for the owning type.
 
-So, until custom DSTs and fat pointers are possible, `ndarray` must continue to have both a reference type and a separate view type.
+So, until custom DSTs and fat pointers are possible, `ndarray` must continue to have both a reference type (for `deref`) and a separate view type (for non-owning but non-reference arrays).
 
 > [!TIP]
 > `ndarray` must define a non-owning view type which can represent a look into a subset of an owning type, reference type, or another view type.
@@ -221,9 +162,9 @@ However, I'd argue that keeping this kind of API would be even more confusing to
 For reasons I'll discuss later, we already expect the owning, view, and reference types to have three generic parameters.
 Keeping an `ArrayBase` concept that encompasses both the owning type and the view type would require a *fourth* generic, and the function signature would look like
 ```rust
-fn mutate_base<T, S, D, A>(arr: &mut ArrayBase<T, S, D, A>);
+fn mutate_base<O, S, D, A>(arr: &mut ArrayBase<O, S, D, A>);
 ```
-where `T` is the "type" of array it is (owning or view), `S` is the storage (different from `ndarray`'s current storage concept, see below), `D` is the dimensionality, and `A` is the element type.
+where `O` is the "ownership" of the array, `S` is the storage (different from `ndarray`'s current storage concept, see below), `D` is the dimensionality, and `A` is the element type.
 And god forbid they should want to write such a function that has more than one argument.
 
 Instead, I'd suggest that the reference type allows for mutability of both data and shape.
@@ -244,7 +185,7 @@ However, there's one place where the parallels totally break down: arrays are no
 So we've already got two generics, `A`, and `D`.
 
 `ndarray` currently (0.16.1) has a third generic parameter, `S`, for "storage".
-At the moment, that storage type serves to pack three concepts into `ArrayBase`: "raw" array types, view types, and shared array data via `Arc`.
+At the moment, that storage type serves to pack three concepts into `ArrayBase`: "raw" array types, view types, and shared array data via `Arc` and `Cow`.
 I'd like to argue that while the storage generic has an important place, the current implementation packs in too many ideas.
 In particular, the fact that an array is a view should not be considered part of storage, and should instead be handled by a separate struct.
 
@@ -258,6 +199,66 @@ But I do think that the separation of "index to offset" and "offset to reference
 > [!IMPORTANT]
 > Is following `mdspan`'s design ill-advised?
 > If it is a good idea, what should the specifics of the traits be that enable / enforce that design?
+
+# A Totally Inadequate Primer on Rust's Slices
+Ok, so what's going on with slices?
+We know them, we love them, and I absolutely did not understand them until I started thinking about `ndarray`'s internals.
+The slice is a [*dynamically sized type*](https://doc.rust-lang.org/reference/dynamically-sized-types.html), and a reference to a slice is known as a "fat pointer".
+And [what is a "fat pointer"](https://stackoverflow.com/questions/57754901/what-is-a-fat-pointer)?
+It's a pointer, plus some additional information about that pointer, that still looks and acts like a pointer.
+
+... Ok, so that sentence is all well and good, but to be honest it didn't really click with me when I read it for the first time.
+Or the second time.
+Or really ever.
+So I embarked on a hunt of Rust's own code to learn about the birds and the bees of slices: how are they born?
+I found a method that claimed to create one from thin air ([`std::slice::from_raw_parts`](https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html)) and went from there:
+```rust
+pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+    unsafe {
+        // ...
+        // Some safety stuff we don't care about right now...
+        // ...
+        &*ptr::slice_from_raw_parts(data, len)
+    }
+}
+```
+Ok, so far so good: we want a slice, we know where the data lies (`data`) and the amount of data we have (`len`) and we call a function that gives us a slice that we dereference and then borrow.
+So what's that [`slice_from_raw_parts`](https://doc.rust-lang.org/stable/std/ptr/fn.slice_from_raw_parts.html) doing?
+```rust
+pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
+    from_raw_parts(data, len)
+}
+```
+It's... a wrapper.
+That returns a pointer to a slice.
+Kinda disappointing, huh?
+But what's this `ptr::from_raw_parts`, then?
+How did we **make** that slice?
+We all know we "cannot return value referencing local variable" [[1](https://stackoverflow.com/questions/32682876/is-there-any-way-to-return-a-reference-to-a-variable-created-in-a-function), [2](https://stackoverflow.com/questions/43079077/proper-way-to-return-a-new-string-in-rust), [3](https://stackoverflow.com/questions/29428227/return-local-string-as-a-slice-str), [4](https://stackoverflow.com/questions/32300132/why-cant-i-store-a-value-and-a-reference-to-that-value-in-the-same-struct)] because the Rust compiler has yelled at us so many times about it.
+So how on God's Green Earth did the Rust language itself just return a pointer to a slice that was created in a local function?
+Is it cheating?
+Divine intervention?
+I had to know.
+
+So let's look at [`from_raw_parts`](https://doc.rust-lang.org/std/ptr/fn.from_raw_parts.html)[^1]:
+```rust
+pub const fn from_raw_parts<T: ?Sized>(
+    data_pointer: *const impl Thin,
+    metadata: <T as Pointee>::Metadata,
+) -> *const T { // <-- Shouldn't this be a *const [T]??
+    // Intrinsics magic
+}
+```
+When I saw this definition my head spun.
+This `from_raw_parts` function returns... a pointer to `T`?
+A plain old pointer?
+But then how does `slice_from_raw_parts`, without any additional magic, return a pointer to a *slice*?
+Where did the *slice* come from?
+
+And that's when it clicked: a slice *is a pointer*.
+A *fat* pointer, which "magically" contains the length of the data within the pointer type itself.
+Rust performs a perfectly legal type cast when it calls that final function, switching the return type on you, but `&[T]` is synctactic sugar for a `*const T` with some metadata packed in there.
+
 
 [^0]: And that's not an exhaustive list! Names pulled from contributions and discussions on the `ndarray` GitHub page.
 [^1]: An experimental API, so stable Rust is actually cheating here.
