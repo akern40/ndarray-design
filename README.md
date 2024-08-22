@@ -192,6 +192,8 @@ In particular, the fact that an array is a view should not be considered part of
 The storage type would then be free to implement something closer to `mdspan`'s `AccessorPolicy`.
 In that design, the `LayoutPolicy` (which would likely be the `D` generic type here) is responsible for turning an index into a linear offset from the "origin" or "start" of the array (or array view).
 If `D` played that role in `ndarray`, then the storage type could act like `AccessorPolicy`, responsible for turning that linear offset into a reference for the correct position in the array.
+This essentially acts as an abstraction over pointers, allowing downstream users and developers the ability to dispatch on the kind of data being pointed to, all the way down to the reference type.
+This could allow for downstream specializations of the data that back an array; one prime example would be putting that data on a GPU or other accelerator.
 
 I should be clear that a complete copy of `mdspan` is neither possible nor desirable; it's a standard designed for C++, and will not translate to idiomatic Rust on a 1:1 basis.
 But I do think that the separation of "index to offset" and "offset to reference" is a smart design.
@@ -199,6 +201,24 @@ But I do think that the separation of "index to offset" and "offset to reference
 > [!IMPORTANT]
 > Is following `mdspan`'s design ill-advised?
 > If it is a good idea, what should the specifics of the traits be that enable / enforce that design?
+
+## `Arc`s, `Cow`s, and Shared Ownership (Oh My!)
+`ndarray` currently supports a special kind of shared ownership / copy-on-write by way of `ArcArray` and `CowArray`.
+These incorporate their eponymous smart pointer types (`Arc` and `Cow`, respectively) by only holding the *data* as shared, not the shape of the array.
+This has several advantages: firstly, shapes tend to be relatively inexpensive allocations as compared to the array data itself, so you'd like to be able to change them easily without having to copy the underlying data.
+Second, `ndarray` can handle the copy-on-write internally, allowing for an ergonomic copy-on-write rather than doing something like `Arc::make_mut(...)`.
+(This is a challenge, however, as it currently requires developers to ensure the uniqueness of the underlying data whenever they go to mutate it).
+
+So how would this shared ownership model work with the above generic design?
+`Cow` has a relatively simple option: with the introduction of the reference type, the owning type (and the viewing type) can implement `Borrow<ReferenceType>`, allowing the reference type to implement `ToOwned`, allowing users to use `Cow<ReferenceType>`.
+The difference from `CowArray` would be that the `Cow` wrapper would cover both the data and the shape, so changes to the shape would cause a data copy.
+Either way, those traits should be implemented, so `Cow<ReferenceType>` will be an option.
+
+The other option (coexisting with the `Cow` option above) is to embed `Cow` and `Arc` (and possibly others) within the generics listed above, similar to how the current (0.16.1) design works.
+The key to `ArcRepr` and `CowRepr` is, essentially, in their customization of `Clone` and in their logic for ensuring uniqueness via an in-place copy of their data.
+This could be accomplished by using an "ownerhip" generic on the owning type.
+The downside of this is it introduces a fourth generic (!) to owned types, which is... excessive.
+The upside is that it retains the data-only copy-on-write capabilities that already exist, while being interoperable with the other generics (for example, `CowArray`s for GPU, if the storage and underlying ownership types are GPU-based).
 
 # A Totally Inadequate Primer on Rust's Slices
 Ok, so what's going on with slices?
