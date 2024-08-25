@@ -9,18 +9,19 @@ mod test_functions {
     use core::fmt::Debug;
 
     use crate::core::{
-        Array, ArrayRef, ArrayView, ArrayViewMut, Layout, NdArray, RawArrayRef, RawArrayView,
-        RawArrayViewMut, RawNdArray,
+        Array, ArrayRef, ArrayView, ArrayViewBase, ArrayViewBaseMut, ArrayViewMut, Layout, NdArray,
+        RawArrayRef, RawArrayView, RawArrayViewBase, RawArrayViewBaseMut, RawArrayViewMut,
+        RawNdArray, Storage,
     };
 
     fn ergonomic_raw<A, L: Layout>(arr: &RawArrayRef<A, L>) {
-        println!("{:?}", arr.ptr());
+        println!("{:?}", arr.as_ptr());
     }
     fn ergonomic<A: Debug, L: Layout>(arr: &ArrayRef<A, L>) {
         println!("{:?}", arr.first());
     }
     fn ergonomic_raw_mut<A, L: Layout>(arr: &mut RawArrayRef<A, L>) {
-        println!("{:?}", arr.ptr_mut());
+        println!("{:?}", arr.as_mut_ptr());
     }
     fn ergonomic_mut<A: Debug, L: Layout>(arr: &mut ArrayRef<A, L>) {
         println!("{:?}", arr.first_mut());

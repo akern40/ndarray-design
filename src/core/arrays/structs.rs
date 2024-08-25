@@ -13,47 +13,51 @@
 //! the mutability or data dereference safety of their particular representations.
 //! See [`crate::array_deref`] for how this is accomplished.
 
-use crate::core::{ArrayRef, RawArrayRef};
+use crate::core::{
+    storage::NonNullStorage, ArcBackend, ArrayRefBase, Backend, RawArrayRefBase, VecBackend,
+};
 use std::marker::PhantomData;
 
 /// An owned array.
 ///
-/// The representation here is slightly different from ArrayBase
-/// in order to make it easier to implement Deref safely.
+/// This representation is meant to encompass a whole variety of use cases.
+/// As such, it is generic in three types:
+///     1. `L`, the layout, representing the kind of shape it has
+///     2. `S`, the storage, representing the underlying pointer
+///     3. `O`, the ownership, representing any additional information needed for memory management.
 #[derive(Debug)]
-pub struct Array<A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
-    pub(crate) cap: usize,
-    pub(crate) len: usize, // This may seem redundant, but we don't know what type `L` is;
-                           // we won't even require it to be bound by Layout. As a result,
-                           // we need to manually keep track of the "length" of elements in the array,
-                           // even though this information is redundant with the layout in `ArrayRef`.
+pub struct ArrayBase<L, B: Backend> {
+    pub(crate) aref: ArrayRefBase<L, B>,
+    pub(crate) own: B::Owned,
 }
+
+pub type Array<A, L> = ArrayBase<L, VecBackend<A>>;
+pub type ArcArray<A, L> = ArrayBase<L, ArcBackend<A>>;
 
 /// A view of an existing array.
 #[derive(Debug)]
-pub struct ArrayView<'a, A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
-    pub(crate) life: PhantomData<&'a A>,
+pub struct ArrayViewBase<'a, L, B: Backend> {
+    pub(crate) aref: ArrayRefBase<L, B>,
+    pub(crate) life: PhantomData<&'a B::Elem>,
 }
 
 /// A mutable view of an existing array
 #[derive(Debug)]
-pub struct ArrayViewMut<'a, A, L> {
-    pub(crate) meta: ArrayRef<A, L>,
-    pub(crate) life: PhantomData<&'a mut A>,
+pub struct ArrayViewBaseMut<'a, L, B: Backend> {
+    pub(crate) aref: ArrayRefBase<L, B>,
+    pub(crate) life: PhantomData<&'a mut B::Elem>,
 }
 
 /// A view of an array without a lifetime, and whose elements are not safe to dereference.
 #[derive(Debug)]
-pub struct RawArrayView<A, L> {
-    pub(crate) meta: RawArrayRef<A, L>,
-    pub(crate) life: PhantomData<*const A>,
+pub struct RawArrayViewBase<L, B: Backend> {
+    pub(crate) aref: RawArrayRefBase<L, B>,
+    pub(crate) life: PhantomData<*const B::Elem>,
 }
 
 /// A mutable view of an array without a lifetime, and whose elements are not safe to dereference.
 #[derive(Debug)]
-pub struct RawArrayViewMut<A, L> {
-    pub(crate) meta: RawArrayRef<A, L>,
-    pub(crate) life: PhantomData<*mut A>,
+pub struct RawArrayViewBaseMut<L, B: Backend> {
+    pub(crate) aref: RawArrayRefBase<L, B>,
+    pub(crate) life: PhantomData<*mut B::Elem>,
 }

@@ -5,44 +5,36 @@
 
 // I'll start with NdLayout:
 
-use std::ptr::NonNull;
+// use crate::core::{ArrayRefBase, Layout, NdArray, NdLayout, RawArrayRefBase, RawNdArray, Storage};
 
-use crate::core::{ArrayRef, Layout, NdArray, NdLayout, RawArrayRef, RawNdArray};
+// impl<L: Layout, S> NdLayout<L> for RawArrayRefBase<L, S> {
+//     fn len(&self) -> usize {
+//         self.layout.size()
+//     }
+// }
 
-impl<A, L: Layout> NdLayout<L> for RawArrayRef<A, L> {
-    fn len(&self) -> usize {
+// // Now for RawNdArray:
+
+// impl<L: Layout, S: Storage> RawNdArray<L, S> for RawArrayRefBase<L, S> {
+//     fn as_ptr(&self) -> *const S::Elem {
+//         unsafe { self.storage.as_ptr() }
+//     }
+
+//     fn as_mut_ptr(&mut self) -> *mut S::Elem {
+//         unsafe { self.storage.as_ptr() }
+//     }
+// }
+
+// // // And finally NdArray
+
+// impl<L: Layout, S: Storage> NdArray<L, S, RawArrayRefBase<L, S>> for ArrayRefBase<L, S> {}
+
+use crate::core::{Backend, Layout};
+
+use super::RawArrayRefBase;
+
+impl<L: Layout, B: Backend> RawArrayRefBase<L, B> {
+    pub fn len(&self) -> usize {
         self.layout.size()
     }
 }
-
-impl<A, L: Layout> NdLayout<L> for ArrayRef<A, L> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-// Now for RawNdArray:
-
-impl<A, L: Layout> RawNdArray<A, L> for RawArrayRef<A, L> {
-    fn ptr(&self) -> &NonNull<A> {
-        &self.ptr
-    }
-
-    fn ptr_mut(&mut self) -> &mut NonNull<A> {
-        &mut self.ptr
-    }
-}
-
-impl<A, L: Layout> RawNdArray<A, L> for ArrayRef<A, L> {
-    fn ptr(&self) -> &NonNull<A> {
-        self.0.ptr()
-    }
-
-    fn ptr_mut(&mut self) -> &mut NonNull<A> {
-        self.0.ptr_mut()
-    }
-}
-
-// And finally NdArray
-
-impl<A, L: Layout> NdArray<A, L> for ArrayRef<A, L> {}
