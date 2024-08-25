@@ -220,6 +220,13 @@ This could be accomplished by using an "ownerhip" generic on the owning type.
 The downside of this is it introduces a fourth generic (!) to owned types, which is... excessive.
 The upside is that it retains the data-only copy-on-write capabilities that already exist, while being interoperable with the other generics (for example, `CowArray`s for GPU, if the storage and underlying ownership types are GPU-based).
 
+There is one more catch to this implementation: the `DerefMut` implementation that allows going from the owning type to the reference type would have to be the place that contains the logic for ensuring uniqueness.
+Since we said above that the reference type's shape can be changed, that means we're going to ensure uniqueness even for just mutating the shape.
+For `ArcArray`, this problem occurs in a very particular situation: an already-shared `ArcArray` wants its shape mutated (but not its data) without a copy of the underlying data.
+Right now, this happens automagically; this design would force a slightly less ergonomic solution: get a non-mutable view type, change its shape, and go back to owning, e.g., `arc.view().alter_shape().to_shared_from(arc)`.
+The `to_shared_from` function there would act like `to_owned`, but would join the already-existing underlying shared data.
+Unfortunately, the `to_shared_from` would also likely be unsafe, due to the fact that the view you're making shared *must* come from the same allocation, an invariant which the compiler can't check.
+
 # A Totally Inadequate Primer on Rust's Slices
 Ok, so what's going on with slices?
 We know them, we love them, and I absolutely did not understand them until I started thinking about `ndarray`'s internals.
