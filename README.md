@@ -214,6 +214,71 @@ DerefMut│     ┌─────────────│ ViewMut  ◄──
         DerefMut └────────┘                                
 ```
 
+## `ArrayBase`, Shared Data, and `Deref`
+Most of this design document has focused on building up `ndarray`'s design without mentioning its current design.
+However, blindly following the above diagram is already a breaking change: the owning, view, and raw view types are *not* independent in the current `ndarray` design.
+Instead, they are all (partial) monomorphizations of the `ArrayBase` type.
+This raises an issue for our `Deref` structure above, since we can't have multiple `Deref` implementations for the same type.
+
+So what if we could limit the `Deref` on `ArrayBase` just to safe data?
+It turns out that `ndarray` already has a trait for this: `Data`, which guarantees exactly that.
+We can keep our unconditional `Deref` from `Reference` to `RawReference`, and we'll get the following flow (flipped from above):
+```
+┌────────────┐
+│ArrayBase   │
+└────┬───────┘
+     │Deref when S: Data
+     │DerefMut when S: DataMut
+     │
+┌────▼───────┐
+│Reference   │
+└────┬───────┘
+     │Deref
+     │DerefMut
+     │
+┌────▼───────┐
+│RawReference│
+└────────────┘
+```
+However, we've cut off our raw views from chain of functionality.
+Do we now have to re-implement all shared functionality onto `RawView`?
+
+To save ourselves this trouble, let's use one of Rust's conversion semantics: `AsRef`.
+We'll re-link our raw views via `AsRef` and `AsMut` implementations to get the following:
+```
+                 ┌──────────┐                   
+              ┌──┼ArrayBase │                   
+              │  └────┬─────┘                   
+              │       │Deref when S: Data      
+AsRef         │       │DerefMut when S: DataMut
+when          │       │                        
+S: RawData    │  ┌────▼───────┐                   
+              │  │Reference   ┼───────┐           
+AsMut         │  └────┬───────┘       │           
+when          │       │Deref          │AsRef      
+S: RawDataMut │       │DerefMut       │AsMut      
+              │       │               │           
+              │  ┌────▼───────┐       │           
+              └──│RawReference◄───────┘           
+                 └────────────┘                  
+```
+Note that `ArrayRef` also needs `AsRef` and `AsMut`; functions written to take `AsRef<RawRef>` should be able to accept `ArrayRef` in addition to `ArrayBase`.
+
+This structure isn't ideal; users of `ndarray` now need to write functions that can operate on 
+
+### Shared Data
+In addition to the types we've already discussed, `ndarray` also provides for seamless copy-on-write shared-data arrays.
+It does this for both the usual `Cow` case via `CowArray`, and for the thread safe case via `ArcArray`.
+
+While I can't speak to the original design or inspiration for `ArrayBase` unifying all of these concepts, these types do have a nice unifying behavior: they all own their *layout*, even if they don't own their data.
+
+This leaves us with a few options:
+1. Somehow reduce to just using a single `Deref` implementation
+2. Implement `Deref` individually for each monomorphized type
+
+Option 2 here would make it exceedingly difficult to write functions and traits generically over `ArrayBase`, so that seems like it's out.
+Instead, we'll narrow our focus of the `Deref` structure: since our `Reference` type should have 
+
 ## Generic Parameters, C++23's `mdspan`, and Backends
 Ok, so we've gone through the parallels between `Vec`s and arrays and seen what the consequences are for our designs.
 However, there's one place where the parallels totally break down: arrays are not just generic in type, but also in dimensionality (at least).
