@@ -10,63 +10,66 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::core::{
-    Array, ArrayRef, ArrayView, ArrayViewMut, RawArrayRef, RawArrayView, RawArrayViewMut,
+    ArrayRefBase, ArrayViewBase, ArrayViewBaseMut, Backend, RawArrayRefBase, RawArrayViewBase,
+    RawArrayViewBaseMut,
 };
 
-impl<A, L> Deref for Array<A, L> {
-    type Target = ArrayRef<A, L>;
+use super::ArrayBase;
+
+impl<L, B: Backend> Deref for ArrayBase<L, B> {
+    type Target = ArrayRefBase<L, B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.meta
+        &self.aref
     }
 }
 
-impl<A, L> DerefMut for Array<A, L> {
+impl<L, B: Backend> DerefMut for ArrayBase<L, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.meta
+        &mut self.aref
     }
 }
 
-impl<'a, A, L> Deref for ArrayView<'a, A, L> {
-    type Target = ArrayRef<A, L>;
+impl<'a, L, B: Backend> Deref for ArrayViewBase<'a, L, B> {
+    type Target = ArrayRefBase<L, B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.meta
+        &self.aref
     }
 }
 
-impl<'a, A, L> Deref for ArrayViewMut<'a, A, L> {
-    type Target = ArrayRef<A, L>;
+impl<'a, L, B: Backend> Deref for ArrayViewBaseMut<'a, L, B> {
+    type Target = ArrayRefBase<L, B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.meta
+        &self.aref
     }
 }
 
-impl<'a, A, L> DerefMut for ArrayViewMut<'a, A, L> {
+impl<'a, L, B: Backend> DerefMut for ArrayViewBaseMut<'a, L, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.meta
+        &mut self.aref
     }
 }
 
-impl<A, L> Deref for RawArrayView<A, L> {
-    type Target = RawArrayRef<A, L>;
+impl<L, B: Backend> Deref for RawArrayViewBase<L, B> {
+    type Target = RawArrayRefBase<L, B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.meta
+        &self.aref
     }
 }
 
-impl<'a, A, L> Deref for RawArrayViewMut<A, L> {
-    type Target = RawArrayRef<A, L>;
+impl<'a, L, B: Backend> Deref for RawArrayViewBaseMut<L, B> {
+    type Target = RawArrayRefBase<L, B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.meta
+        &self.aref
     }
 }
 
-impl<'a, A, L> DerefMut for RawArrayViewMut<A, L> {
+impl<'a, L, B: Backend> DerefMut for RawArrayViewBaseMut<L, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.meta
+        &mut self.aref
     }
 }
