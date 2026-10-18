@@ -1,223 +1,92 @@
-# Roadmap: from `Dimension` to `Layout`
+# Roadmap: from `Dimension` to `Layout` (draft)
 
-Working document for moving `ndarray` from `ArrayParts { ptr, dim: D, strides: D }` to `ArrayParts { ptr, layout: L }`.
-The base is `rust-ndarray/ndarray@refactor` (after #1575), with `refactor` names treated as canonical.
-Checkboxes track progress. Anything marked **Q** is an open decision.
+This is mostly a list of open design questions. Only §1 has been decided. §2 is the one next step that's concrete. Everything after that is still undecided, and the aim is to answer each question before writing the code that depends on it.
 
-## 0. End state
+Guiding principle: introduce **minimal traits that are clearly right**, then grow them as real needs come up. Having less functionality than today's API is fine. Locking in a bad decision isn't.
 
-```rust
-pub struct ArrayBase<S: RawData, L> { data: S, parts: ArrayPartsSized<S::Elem, L> }
-pub struct ArrayRef<A, L>(LayoutRef<A, L>);         // likewise RawRef / LayoutRef
-pub type Array<A, L> = ArrayBase<OwnedRepr<A>, L>;
-pub type Array2<A> = Array<A, StridedLayout<R2>>;   // aliases keep their names
-```
+## 1. Decided
 
-- Rank, shape, strides, index, and layout are separate traits (§2).
-- A strided layout is just one kind of `Layout`. Most of today's methods move to `impl<A, L: Strided> ArrayRef<A, L>`. Only offset-based functionality goes on `impl<A, L: Layout>`.
-- `Dimension`, `Dim`, `Ix*`, `IxDynImpl`, `IntoDimension`, `DimAdd`, `DimMax`, `RemoveAxis`, `ShapeBuilder`, `StrideShape` and the old `NdIndex` are deprecated, then removed one release later.
-- No `Cow` in the traits (it isn't available without `alloc`). Accessors either return `&` to stored data (a ZST `&` is free, so `const` shapes work too) or return an iterator.
+- **Goal:** `ArrayParts` stores a layout instead of explicit `dim`/`strides`. `Dimension` is the integration point during migration and reaches the layout through an **associated type**. A later breaking switch deprecates the `D`-based APIs.
+- **Names:** the names on the `rust-ndarray/ndarray@refactor` branch are canonical (`Rank`, `ConstRank`, `DynRank`, `RAdd`, `RMax`, `Ranked`).
+- **`Rank` only encodes the number of axes.** `Ranked` connects it to the runtime `ndim()`. `Rank` doesn't know about shapes, strides, indices or any representation.
+- **No `Cow` in the traits.** Shape and stride access goes through iterators (or `&` to stored data).
+- **Shapes are read-only, with no public safe API for mutating them.** Changing a shape almost always requires checking invariants about the strides and the allocation. So any change happens through operations that keep those invariants, never through "set axis length".
+- **Name collisions** (`crate::Shape` from `shape_builder`, and `crate::Layout` as the deprecated alias of `LayoutBitset`) are resolved by deprecation/renaming before the new names reach the crate root.
+- **Landed so far:** the reference types (#1440, #1532), the `LayoutBitset` rename, `Rank` (#1568) and `Ranked` (#1575). In review: #1621 (`Ranked` in the prelude) and #1622 (lint fixes).
 
-## 1. Where we are
+## 2. Next step: a minimal `Shape`
 
-- [x] Reference types `LayoutRef`/`ArrayRef`/`RawRef`, made sound via a DST (#1440, #1532)
-- [x] `LayoutBitset` rename; `crate::Layout` is now a deprecated alias (#1563, #1567)
-- [x] `Rank`, `ConstRank<N>`, `DynRank`, `R0..R12`, `RAdd`, `RMax` (#1568)
-- [x] `Ranked { type NDim; fn ndim }` added as a supertrait of `Dimension` (#1575)
-- [ ] Export `Ranked` from the prelude (#1621). Also consider a crate-root re-export, since `use ndarray::Dimension;` users still break on `.ndim()` for concrete types.
-- [ ] `Shape` + `NShape`/`DShape` (fork branch `shape-trait`)
+The `shape-trait` branch has `Shape: Ranked` with `axis_len`, `iter`, and provided methods `size_checked`, `size_bytes_checked` and `iter_isize`. Questions to settle before it lands:
 
-## 2. Trait designs
+- Should `axis_len` take `usize` or `Axis`? `Axis` matches the public API.
+- Does `iter_isize` belong here? It's an offset/strides concern.
+- Which bounds should it have (`Clone`, `Eq`, `Debug`, `Send`, `Sync`)? Keep them minimal and add them when a user of the trait needs them.
+- How should it connect to `Dimension`? Either `Dimension: Shape` (the `Dim` types already *are* shapes, so this is cheap and doesn't commit to a representation) or an associated `Dimension::Shape` (which commits to a representation now).
+- **Leave out on purpose:** mutation, construction, rank-changing operations, and pattern/tuple conversion.
 
-### 2.1 `Rank` gets type maps
+## 3. Open questions: trait design
 
-Make `Rank` the single place that maps a rank to its default concrete types. All the rank-changing methods (`index_axis`, `insert_axis`, `stack`, broadcasting) then come for free through `R::Smaller` / `R::Larger` / `RMax` / `RAdd`, so per-shape `Smaller`/`Larger` types aren't needed.
+### 3.1 Where do rank-changing operations live?
+These are `index_axis`, `insert_axis`, `remove_axis`, `into_dyn`, broadcasting and `stack`.
+- (a) The type being changed has an associated output type (like today's `Smaller`/`Larger`, but on the shape/layout trait, or as per-operation traits).
+- (b) A separate "representation family" trait that maps a rank to a concrete type (e.g. a GAT `Of<R: Rank>`), kept *outside* `Rank`.
+- (c) Rank-changing operations always produce a general-purpose representation.
+- Rejected: `Rank` as a type map, because it puts the dependency the wrong way round.
+- Not yet answered: what happens to partially-`const` shapes when you remove a `const` axis, or insert an axis next to one?
 
-```rust
-pub trait Rank: /* existing bounds */ {
-    const N: Option<usize>;
-    type Smaller: Rank;
-    type Larger: Rank;
-    // new
-    type Shape:   ShapeMut<NDim = Self>;      // NShape<N> | DShape
-    type Strides: StridesMut<NDim = Self>;    // NStrides<N> | DStrides
-    type Index:   ?Sized + IndexFor<Self>;    // [usize; N] | [usize]
-}
-pub type StridedLayout<R> = Strided<<R as Rank>::Shape, <R as Rank>::Strides>;
-```
+### 3.2 How do shapes and strides change at all?
+There's no public safe setter, but slicing, collapsing, inverting, permuting and reshaping all have to happen somehow.
+- What's the smallest set of invariant-preserving operations? Are they on the layout, or free functions over concrete types?
+- Does the unsafe "raw mutation" surface need to be a trait so generic internal code can use it, or can it live on each concrete representation?
+- How do partially-mutable representations (some axes `const`) take part, or do they opt out of some operations?
+- Constructors should check (shape, strides, allocation length) together. Where does that check live?
 
-Custom shapes (e.g. a `const` `ConstMatrixShape<N, M>`) fall back to `R::Shape` when an operation changes the rank or an axis length.
+### 3.3 Strides
+- Is `Strides` a standalone trait, or does it only exist inside a strided layout? Does anything need generic strides outside a layout?
+- Strides should be signed `isize`, which also gets rid of today's practice of storing strides as `usize` and reinterpreting them as `isize`.
+- Should strides ever be `const`?
 
-**Q:** `Index` for dynamic rank: should it be unsized `[usize]` (as in `layout-v2`) or a sized `DShape`-like `DIndex`? Unsized avoids allocation for `arr[&[1, 2, 3][..]]`, but it can't be returned from iterators (`indexed_iter`). A sized inline-small-vector type is probably needed for iteration either way.
+### 3.4 Layout
+- What's the minimal surface? Probably: the shape, the offset of an index, and the offset range (needed for soundness). Does `shape()` return `&Self::Shape` (works for stored shapes and for zero-sized `const` ones), or does `Layout` expose shape methods directly so shapes can be computed?
+- How does `Strided: Layout` relate to non-strided layouts? Make sure nothing in `Layout` assumes strides.
+- Which of today's methods only need `Layout`, and which need `Strided`? This needs a method-by-method audit (§5 is the starting point).
 
-### 2.2 `Shape`
+### 3.5 Index type
+- Should it be an associated type per layout? Sized or unsized for dynamic rank? Iterators like `indexed_iter` need something sized.
+- How does `NdIndex<E>` (tuples, arrays, `usize`, `&[usize]`) map onto it?
 
-The `shape-trait` design, plus a mutable subtrait and conversions:
+### 3.6 Iteration order and non-strided layouts
+- Should iteration order be part of `Layout` or something separate? It can probably wait, as long as `Layout` doesn't rule it out.
 
-```rust
-pub trait Shape: Ranked + Clone + Eq + Debug + Send + Sync {
-    type Iter<'a>: ExactSizeIterator<Item = usize> + DoubleEndedIterator where Self: 'a;
-    fn axis_len(&self, axis: Axis) -> usize;     // Axis, not usize, to match the rest of the API
-    fn iter(&self) -> Self::Iter<'_>;
-    fn size_checked(&self) -> Option<usize>;     // provided
-    fn size_bytes_checked<T>(&self) -> Option<usize>; // provided
-    fn to_rank_default(&self) -> <Self::NDim as Rank>::Shape; // provided; the fallback for custom shapes
-}
-pub trait ShapeMut: Shape + IndexMut<Axis, Output = usize> {
-    fn from_elem(ndim: usize, v: usize) -> Result<Self, ShapeStrideError<Self>>; // replaces Dimension::zeros
-    fn as_slice(&self) -> &[usize]; // NShape/DShape own their storage, so this is allowed here
-}
-pub trait IntoShape { type NDim: Rank; type Shape: Shape<NDim = Self::NDim>; fn into_shape(self) -> Self::Shape; }
-// IntoShape impls: usize, tuples (Ix0..6 patterns), [usize; N], &[usize], Vec<usize>, NShape, DShape
-// (and Dim<_> during the transition)
-pub trait Patterned: Shape { type Pattern; fn into_pattern(self) -> Self::Pattern; } // NShape<0..=6> only
-```
+### 3.7 Patterns, construction and other D-generic traits
+- `dim() -> Pattern` (tuples) is used a lot downstream. Should that become a conversion on concrete shapes, or stay only in the `D` world?
+- What replaces `IntoDimension`/`ShapeBuilder`/`StrideShape` for building shapes from user input, and how are order and strides specified?
+- What do `NdProducer` (`type Dim`, `raw_dim`, `uget_ptr`), `SliceArg<D>` (`OutDim`) and broadcasting (`DimMax`→`RMax`) actually need from the new traits?
 
-- `LayoutRef::shape() -> &[usize]` stays as a concrete method while the layout stores an `NShape`/`DShape`. Generic code should use `shape_iter()` / `axis_len()`.
-- `dim() -> Pattern` stays, bounded on `L::Shape: Patterned`. It's popular downstream (ndarray-linalg: 20 call sites).
+## 4. Open questions: transition
 
-**Q:** Should `Shape: Index<Axis>` be required? It isn't possible for computed shapes that can't hand out a `&usize`. Proposal: no, use `axis_len` instead.
+- **The `D` → layout associated type:** what bounds does it have? Do the `Dim` types also implement the new traits directly? What do `raw_dim()` and the like cost?
+- **Storage swap:** can `ArrayParts` store `D::Layout` while the public API still uses `D`? `shape() -> &[usize]` and `strides() -> &[isize]` need the concrete transitional layouts to be backed by slices. Is that acceptable until the switch?
+- **The switch:** what happens to hand-written `Array<A, Ix2>`, `Ix2(..)` values, and `raw_dim()`? How long is the deprecation cycle? What's the order for downstream crates (ndarray-linalg, ndarray-stats, rust-numpy; usage counts are in `notes/inventory-scratch.md`)?
+- **Names:** what should `shape_builder::Shape` be renamed to? Removing `crate::Layout` is a breaking change; when does it go?
+- **Sealing:** `Dimension`, `NdProducer` and `SliceArg` are sealed, so adding supertraits or associated types doesn't break implementors. It can still break callers when a method moves between traits on concrete types (as `ndim` did in #1575). Watch for this at every step.
+- **Performance:** check before and after each storage change, especially `IxDyn` and the `Ix1`/`Ix2` hot loops.
 
-### 2.3 `Strides`
+## 5. Inventory: today's API and which concept it relies on
 
-Mirrors `Shape`, but with `isize` (which also fixes today's usize-reinterpreted-as-isize strides):
+This doesn't decide replacements. It's the input to §3.4 and §3.7.
 
-```rust
-pub trait Strides: Ranked + Clone + Eq + Debug + Send + Sync {
-    type Iter<'a>: ExactSizeIterator<Item = isize> + DoubleEndedIterator where Self: 'a;
-    fn stride(&self, axis: Axis) -> isize;
-    fn iter(&self) -> Self::Iter<'_>;
-}
-pub trait StridesMut: Strides + IndexMut<Axis, Output = isize> { fn as_slice(&self) -> &[isize]; }
-```
+| Today | Relies on |
+|---|---|
+| `Dimension::{NDIM, ndim}`, `DimAdd`, `DimMax` | rank |
+| `Dimension::{size, size_checked, slice, equal, zeros}`, `IxDynImpl`, `Pattern`/`into_pattern`, `as_array_view` | shape (+ construction) |
+| `default_strides`, `fortran_strides`, `strides_equivalent`, `is_contiguous`, `_fastest_varying_stride_order`, `min/max_stride_axis` | shape + strides |
+| `stride_offset(_checked)`, `NdIndex<E>`, `first_index`/`next_for(_f)` | index + layout |
+| `slice_mut`, `set_last_elem`, `IndexMut<usize>`, arithmetic supertraits | mutation (internal shape maths) |
+| `insert_axis`, `try_remove_axis`, `RemoveAxis`, `Smaller`/`Larger`, `into_dyn`, `from_dimension` | rank-changing operations |
+| `IntoDimension`, `ShapeBuilder`, `ShapeArg`, `StrideShape`, `shape_builder::Shape` | construction from user input |
+| `LayoutRef::{dim, raw_dim, shape, strides, stride_of, len_of}` | shape/strides access |
+| `index_axis`, lanes/rows/columns, `axis_iter`, `fold_axis`/`map_axis`, `insert_axis`/`remove_axis` methods, `push` | rank-changing operations on strided layouts |
+| `NdProducer`, `Zip`, `SliceArg`, `stack`/`concatenate`, broadcasting | layout + rank operations |
 
-Stride constructors live on the layout (§2.4), not on `Strides`, because they need a shape.
-
-### 2.4 `Layout` and `Strided`
-
-```rust
-/// Safety: offset_range_checked must be exact, and None iff it doesn't fit in isize (see layout-v2 docs).
-pub unsafe trait Layout: Ranked + Clone + Debug + Send + Sync {
-    type Shape: Shape<NDim = Self::NDim>;
-    fn shape(&self) -> &Self::Shape;                                   // & is free for ZST const shapes
-    fn offset(&self, idx: &<Self::NDim as Rank>::Index) -> isize;      // unchecked in release
-    fn offset_checked(&self, idx: &<Self::NDim as Rank>::Index) -> Option<isize>;
-    fn offset_range_checked(&self) -> Option<(isize, isize)>;          // min..=max offset
-    fn bitset(&self) -> LayoutBitset;                                  // feeds Zip
-    fn is_c_contiguous(&self) -> bool; fn is_f_contiguous(&self) -> bool;
-}
-pub trait Strided: Layout {
-    type Strides: Strides<NDim = Self::NDim>;
-    fn strides(&self) -> &Self::Strides;
-}
-/// The ops ndarray actually does to views today. Each preserves the invariants.
-pub trait StridedMut: Strided {
-    fn slice_axis_inplace(&mut self, axis: Axis, s: Slice) -> isize;   // returns ptr offset
-    fn collapse_axis(&mut self, axis: Axis, index: usize) -> isize;
-    fn invert_axis(&mut self, axis: Axis) -> isize;
-    fn swap_axes(&mut self, a: Axis, b: Axis);
-    fn merge_axes(&mut self, take: Axis, into: Axis) -> bool;
-    fn permute(&mut self, perm: &<Self::NDim as Rank>::Index);
-}
-/// Rank-changing ops output the rank-default strided layout.
-pub trait StridedOps: Strided {
-    fn index_axis(&self, axis: Axis, i: usize) -> (StridedLayout<<Self::NDim as Rank>::Smaller>, isize);
-    fn insert_axis(&self, axis: Axis) -> StridedLayout<<Self::NDim as Rank>::Larger>;
-    fn into_dyn(self) -> StridedLayout<DynRank>;
-    fn into_rank<R: Rank>(self) -> Result<StridedLayout<R>, ShapeStrideError<Self>>;
-}
-pub trait FromShape: Layout { fn c(shape: Self::Shape) -> Self; fn f(shape: Self::Shape) -> Self; }
-
-pub struct Strided<Sh, St> { shape: Sh, strides: St }  // the one concrete strided layout
-```
-
-- `StridedMut`/`StridedOps` can be blanket-implemented for `Strided<Sh: ShapeMut, St: StridesMut>`. Kept as traits so a ZST "C-contiguous const" layout can opt out.
-- `Index` uses `Rank::Index` so `arr[[i, j]]` keeps working. `NdIndex<E>` becomes `NdIndex<L: Layout>` with `fn offset_checked(&self, &L)`. The tuple/`usize`/array impls carry over.
-- **Q:** Should `Layout` require the reversible "iteration order" API from the design branch (`index_linear_left/right`, `index_memory_order`), or should that stay in iterators? Proposal: leave it out of v1. Iterators keep using `Strided`, and non-strided layouts get iterators later.
-
-### 2.5 The bridge: `Dimension` associated types
-
-```rust
-pub trait Dimension: ... + Ranked {
-    // new (hidden at first, not behind `unstable`, because they're needed internally)
-    type Shape:   ShapeMut<NDim = Self::NDim> + Into<Self> + From<Self>;  // NShape<N> | DShape
-    type Strides: StridesMut<NDim = Self::NDim>;
-    type Layout:  StridedOps + StridedMut + FromShape + Strided<Shape = Self::Shape, Strides = Self::Strides>;
-}
-// Dim<[usize; N]>: Shape = NShape<N>, Layout = StridedLayout<ConstRank<N>>; IxDyn: DShape / StridedLayout<DynRank>
-// Require <Self::NDim as Rank>::Shape == Self::Shape so D-world and R-world agree.
-```
-
-`ArrayParts<A, D, T>` stores `layout: D::Layout`. The `_dim()`/`_strides()` accessors become `_layout().shape()` / `.strides()`. `raw_dim()` converts `D::Shape -> D`, which costs the same as today's clone.
-
-## 3. Deprecation and rename map
-
-| Today | Replacement | Deprecate in |
-|---|---|---|
-| `crate::Layout` (alias of `LayoutBitset`) | `LayoutBitset` | already deprecated; remove in next breaking release (frees the name) |
-| `crate::Shape<D>` (shape_builder) | rename to `ShapeOrder<D>` (or similar) + deprecated alias | Phase 1 |
-| `StrideShape<D>` | `Strided<Sh, St>` / `(shape, strides)` args | switch |
-| `ShapeBuilder` (`.f()`, `.set_f()`, `.strides()`) | `IntoShape` + `Order` / `FromShape::c`/`f`; `(sh, Order::F)` via `ShapeArg` | switch (keep `.f()` sugar on `IntoShape`?) **Q** |
-| `IntoDimension` | `IntoShape` | switch (blanket `IntoShape for T: IntoDimension` during transition) |
-| `Dim(..)`, `Ix0()..Ix6()`, `IxDyn()` fns | `NShape::from`, `[a, b]`, `DShape::from` | switch |
-| `Ix0..Ix6`, `IxDyn` types | deprecated aliases, see **Q-switch** | switch |
-| `Dimension::{slice, slice_mut}` | `ShapeMut/StridesMut::as_slice` | switch |
-| `default_strides`, `fortran_strides` | `FromShape::c/f` | switch |
-| `zeros(ndim)` | `ShapeMut::from_elem(ndim, 0)` | switch |
-| `stride_offset(_checked)`, `NdIndex<D>` | `Layout::offset(_checked)`, `NdIndex<L>` | switch |
-| `first_index/next_for/next_for_f` | internal index iterator over `Rank::Index` | internal, Phase 4 |
-| `is_contiguous`, `_fastest_varying_stride_order`, `min/max_stride_axis` | `Layout::is_*_contiguous`, `Strided` helpers | Phase 3 (pub(crate)) |
-| `insert_axis/try_remove_axis/RemoveAxis` | `StridedOps::index_axis/insert_axis`, `Rank::Smaller/Larger` | switch |
-| `D::Smaller/Larger` in signatures | `StridedLayout<R::Smaller>` etc. (rank-default) | switch |
-| `DimAdd/DimMax` | `RAdd/RMax` | switch |
-| `NDIM` | `Rank::N` | switch |
-| `Pattern`/`into_pattern` | `Patterned` | switch |
-| `IxDynImpl` | `DShape` | switch |
-| `as_array_view(_mut)` | `aview1(shape.as_slice())` | switch (ndarray-stats uses it 4x) |
-| `NdProducer::{Dim, raw_dim, uget_ptr(&Dim)}` | `type Layout: Strided` / `shape()` / `uget_ptr(&Index)` | switch (sealed, so only the bounds are visible) |
-| `SliceArg<D>::OutDim` | `SliceArg<R: Rank>::OutRank` | switch |
-
-## 4. Phases (each bullet is roughly one PR)
-
-### Phase 1: free names, finish `Ranked` (non-breaking)
-- [ ] #1621 `Ranked` in prelude (+ crate-root re-export?)
-- [ ] Rename `shape_builder::Shape` with a deprecated alias. Plan to remove `crate::Layout` at the switch.
-- [ ] Re-export new traits only under `ndarray::layout::*` until the switch, so nothing collides at the crate root.
-- [ ] Settle the `unstable` feature policy. Proposal: new traits are public under `layout::` but `#[doc(hidden)]`/documented-unstable, and not gated by a feature. Gating `Dimension`'s associated types behind a feature makes internal code use two code paths.
-
-### Phase 2: shapes and strides (non-breaking)
-- [ ] `Shape` + `NShape`/`DShape` (`shape-trait`). Add `ShapeMut`, `IntoShape`, `Patterned`, `Axis` indexing.
-- [ ] `Strides` + `NStrides`/`DStrides` (share `ShapeStrideN` / `DynAxesRepr`)
-- [ ] `Rank::{Shape, Strides, Index}` associated types
-- [ ] `Dimension::{Shape, Strides}` + `From`/`Into` between `Dim<[usize; N]>` ↔ `NShape<N>` and `IxDyn` ↔ `DShape`
-- [ ] `impl IntoShape for T: IntoDimension` (temporary bridge)
-
-### Phase 3: layout traits (non-breaking)
-- [ ] `Layout`, `Strided`, `StridedMut`, `StridedOps`, `FromShape`, `Strided<Sh, St>` + tests (port the `dimension/mod.rs` free fns: `do_slice`, `do_collapse_axis`, `merge_axes`, `offset_from_low_addr_ptr_to_logical_ptr`, `max_abs_offset_check_overflow`)
-- [ ] `Dimension::Layout`
-- [ ] `NdIndex` bridge: `NdIndex<L>` impls alongside `NdIndex<D>`
-
-### Phase 4: swap the guts (non-breaking, internal; the big one)
-- [ ] `ArrayParts { ptr, layout: D::Layout }` + accessors. Keep `D` as the public generic. Can probably be done with `_dim()`/`_strides()` shims first.
-- [ ] Migrate internals one module at a time, removing the shims as you go: constructors → slicing/axis ops (`impl_methods.rs`) → iterators/`Lanes`/`AxisIter` → `zip`/`NdProducer` → reshape/broadcast/stacking → `parallel` → `linalg`
-- [ ] Benchmarks before and after (`benches/`). Watch `IxDyn` (it's `DShape` + `DStrides` now: two inline-small-vector reprs instead of two `IxDynImpl`s, which should be roughly neutral) and the `Ix1`/`Ix2` hot loops.
-
-### Phase 5: introduce the new public API (non-breaking)
-- [ ] `layout()`, `shape_iter()`, `strides_iter()` on `LayoutRef`
-- [ ] Constructors that accept `IntoShape` (they already do, via the bridge from Phase 2)
-- [ ] Write the migration guide in docs (`src/doc/`)
-
-### Phase 6: the switch (breaking release)
-- [ ] The generic changes from `D: Dimension` to `L: Layout` on `ArrayBase`/refs. Aliases `ArrayN`/`ArrayD`, `ArrayViewN`, ... are redefined over `StridedLayout<R>`.
-- [ ] Methods move to `impl<A, L: Strided...>`; signatures switch from `D::Smaller` to `StridedLayout<<L::NDim as Rank>::Smaller>`
-- [ ] Deprecate everything in §3. Remove `crate::Layout`; move the new `Shape`/`Layout` to the crate root.
-- [ ] Downstream PRs: ndarray-linalg, ndarray-stats, rust-numpy (rust-numpy is the heaviest user: `Dimension` 92 call sites, `IntoDimension` 23, `.strides()` 22)
-
-**Q-switch: what happens to `Array<A, Ix2>` written out by hand?** `Ix2` is both a type alias (type namespace) and a fn (value namespace). Proposal: `#[deprecated] type Ix2 = StridedLayout<R2>;` and `fn Ix2(a, b) -> NShape<2>`. Then `Array<f64, Ix2>` and `Ix2(3, 4)` still compile, while `let d: Ix2 = a.raw_dim()` breaks (`raw_dim` gets deprecated and returns `L::Shape`). Alternatively `Ix2` aliases `NShape<2>` and arrays take `StridedLayout<_>`, which breaks every explicit `Array<A, IxN>` instead. I'd pick the first.
-
-## 5. Risks / notes
-
-- **Sealed traits.** `Dimension`, `NdProducer` and `SliceArg` are sealed, so adding associated types or supertraits doesn't break implementors. It *can* still break callers, as `ndim` showed: watch for methods moving between traits on concrete types.
-- **`Dimension` arithmetic supertraits** (`Add`, `Mul`, ...) are used internally for shape math. `NShape` has them; decide whether `ShapeMut` requires them or whether they stay as inherent impls.
-- **Compile times.** `Rank` already brings 13×13 `RAdd`/`RMax` impls. Adding associated types to `Rank` is cheap, but generic `StridedLayout<R::Smaller>` signatures add projection depth.
-- **MSRV.** GATs (`Shape::Iter<'a>`) need 1.65, so 1.87 is fine.
+The most-used compatibility surface downstream: `D::Smaller`/`RemoveAxis`, `Pattern`/`dim()`, `IntoDimension`, and the `shape()`/`strides()` slices.
