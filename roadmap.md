@@ -1,6 +1,6 @@
 # Roadmap: from `Dimension` to `Layout` (draft)
 
-This is mostly a list of open design questions. Only §1 has been decided. §2 is the one next step that's concrete. Everything after that is still undecided, and the aim is to answer each question before writing the code that depends on it.
+This is mostly a list of open design questions. Only §1 has been decided (§1a records the output-type decision and its reasoning). §2 is the one next step that's concrete. Everything after that is still undecided, and the aim is to answer each question before writing the code that depends on it.
 
 Guiding principle: introduce **minimal traits that are clearly right**, then grow them as real needs come up. Having less functionality than today's API is fine. Locking in a bad decision isn't.
 
@@ -13,6 +13,27 @@ Guiding principle: introduce **minimal traits that are clearly right**, then gro
 - **Shapes are read-only, with no public safe API for mutating them.** Changing a shape almost always requires checking invariants about the strides and the allocation. So any change happens through operations that keep those invariants, never through "set axis length".
 - **Name collisions** (`crate::Shape` from `shape_builder`, and `crate::Layout` as the deprecated alias of `LayoutBitset`) are resolved by deprecation/renaming before the new names reach the crate root.
 - **Landed so far:** the reference types (#1440, #1532), the `LayoutBitset` rename, `Rank` (#1568) and `Ranked` (#1575). In review: #1621 (`Ranked` in the prelude) and #1622 (lint fixes).
+
+### 1a. Output types: how an operation names the layout type it returns
+
+A layout type is a record of what the compiler knows about an array's layout. Today that is one fact, the rank. Operations have to name their output type from their input types alone, and two constraints shape every option: axes are runtime `usize` arguments, so an output type can never depend on *which* axis was touched; and stable Rust has no arithmetic on const generics, so `NLayout<{N - 1}>` can't be written.
+
+Decided (mockups comparing the alternatives are in `mockups/output-type/`, with a table in its README):
+
+- **The rule: output types depend on *counts* and *static names*, never on runtime values.** This is the rule nalgebra follows (`remove_fixed_rows::<D>(i)` vs `remove_rows(i, n)`). For rank the count is almost always a static 1 (`remove_axis`, `insert_axis`, `index_axis`, `stack`, `axis(k)` iteration), so today's `Smaller`/`Larger` *are* the fixed-count API; a runtime count means dynamic rank. Where the whole shape is an argument (`into_shape`, `SliceArg`), the output type follows the argument's type, as it already does.
+- **Rank-changing operations keep per-operation associated types** (`Smaller`, `Larger`, dyn; today's `RemoveAxis` pattern), not a GAT. The single-GAT alternative (`type WithRank<R: Rank>`) needs a rank→container map implemented on the rank types, which leaks as bounds on every rank expression in generic signatures, and the GAT doesn't compose (`S::WithRank<A>::WithRank<B>` isn't known to equal `S::WithRank<B>`), so chained operations need equality bounds. Per-operation types chain for free and are what downstream code already uses.
+- **v1 layouts encode rank only.** `const` axis lengths are a *separate shape family* that can be added later as a tuple of per-axis `Const<N>` / `Dyn` slots (nalgebra's `(R, C)` generalised to N axes). Today's `Ix<N>` is then "all axes `Dyn`". Nothing in the rank-only traits needs to anticipate it, provided no trait method returns `Self` after changing a length or rank.
+- **Erasure rule for the const family:** an operation preserves a `const` length only if it names the axis statically *and* doesn't change that axis's length (indexing, element-wise ops, `dot`, static transposes, `fixed_slice::<AXIS, LEN>`). Any runtime axis argument erases *all* lengths to `Dyn`; any runtime length argument erases *that* axis. So `const` shapes are entry points, not full citizens; that is acceptable because the audience (small fixed vectors and matrices) mostly indexes, multiplies and transposes.
+- **Length arithmetic (`concatenate`, `split_at`, const `reshape`) erases to `Dyn`** until Rust has const-generic arithmetic. The macro-table trick that works for rank (`RAdd`/`RMax`, formerly `Dimensionality::{DAdd, DMax}`) doesn't transfer: rank is bounded by 12, lengths aren't. Typenum is rejected for the reasons in the `Dimensionality` doc comment. Macros can't help either: a macro sees tokens, not the inputs' types.
+- **Where the caller states the result, the compiler can still check it** without `generic_const_exprs`, via an inline `const` assertion (stable since 1.79):
+  ```rust
+  fn concatenate<const A: usize, const B: usize, const S: usize>(a: Array<(Const<A>, Dyn)>, b: Array<(Const<B>, Dyn)>) -> Array<(Const<S>, Dyn)> {
+      const { assert!(A + B == S) };
+      ...
+  }
+  let c: Array<(Const<6>, Dyn)> = concatenate(a, b);  // `S` inferred from the annotation; 3 + 3 == 6 is checked, a wrong `S` is a compile error
+  ```
+  `S` can't be inferred from `A + B`, and the check is post-monomorphisation, both acceptable. If `generic_const_exprs` lands, `S` gets the default `{A + B}` without an API break. A bounded `DimAdd` impl table for small lengths would add inference and is a pure addition that can be decided later.
 
 ## 2. Next step: a minimal `Shape`
 
@@ -27,18 +48,13 @@ The `shape-trait` branch has `Shape: Ranked` with `axis_len`, `iter`, and provid
 ## 3. Open questions: trait design
 
 ### 3.1 Where do rank-changing operations live?
-These are `index_axis`, `insert_axis`, `remove_axis`, `into_dyn`, broadcasting and `stack`.
-- (a) The type being changed has an associated output type (like today's `Smaller`/`Larger`, but on the shape/layout trait, or as per-operation traits).
-- (b) A separate "representation family" trait that maps a rank to a concrete type (e.g. a GAT `Of<R: Rank>`), kept *outside* `Rank`.
-- (c) Rank-changing operations always produce a general-purpose representation.
-- Rejected: `Rank` as a type map, because it puts the dependency the wrong way round.
-- Not yet answered: what happens to partially-`const` shapes when you remove a `const` axis, or insert an axis next to one?
+Answered in §1a: per-operation associated types on the shape/layout trait (or per-operation traits), with `const` shapes erasing to the plain family. Still open: whether they sit on `Shape`, on `Layout`, or on the `axis(k)` handle (see §3.4).
 
 ### 3.2 How do shapes and strides change at all?
 There's no public safe setter, but slicing, collapsing, inverting, permuting and reshaping all have to happen somehow.
 - What's the smallest set of invariant-preserving operations? Are they on the layout, or free functions over concrete types?
 - Does the unsafe "raw mutation" surface need to be a trait so generic internal code can use it, or can it live on each concrete representation?
-- How do partially-mutable representations (some axes `const`) take part, or do they opt out of some operations?
+- Partially-mutable representations (some axes `const`): answered in §1a, they erase to the plain family on any runtime-axis or runtime-length operation.
 - Constructors should check (shape, strides, allocation length) together. Where does that check live?
 
 ### 3.3 Strides
