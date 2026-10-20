@@ -1,6 +1,6 @@
 # Roadmap: from `Dimension` to `Layout` (draft)
 
-This is mostly a list of open design questions. Only §1 has been decided (§1a records the output-type decision and its reasoning). §2 is the one next step that's concrete. Everything after that is still undecided, and the aim is to answer each question before writing the code that depends on it.
+This is mostly a list of open design questions. Only §1 has been decided (§1a records the output-type decision, §1b the `Layout`/`Strided` split, each with its reasoning). §2 is the one next step that's concrete. Everything after that is still undecided, and the aim is to answer each question before writing the code that depends on it.
 
 Guiding principle: introduce **minimal traits that are clearly right**, then grow them as real needs come up. Having less functionality than today's API is fine. Locking in a bad decision isn't.
 
@@ -35,6 +35,15 @@ Decided (mockups comparing the alternatives are in `mockups/output-type/`, with 
   ```
   `S` can't be inferred from `A + B`, and the check is post-monomorphisation, both acceptable. If `generic_const_exprs` lands, `S` gets the default `{A + B}` without an API break. A bounded `DimAdd` impl table for small lengths would add inference and is a pure addition that can be decided later.
 
+### 1b. `Layout` and `Strided` are two traits, and the design targets include sparse and block layouts
+
+Decided:
+
+- **Design targets.** Besides today's dense strided arrays, the layout traits must accommodate (1) layouts with *computed* strides (C/F-contiguous and `const`-shape layouts that store no strides), (2) **block/tiled** layouts (Morton/Z-order, GPU and image tilings), and (3) **sparse** layouts. Not every operation has to be efficient, or even available, on every layout, but the traits must not make them unrepresentable. (Arrow's `Tensor` is strided and is not a separate target.)
+- **`Layout` is the general contract and carries nearly all of `ArrayBase`:** the shape, index → location, the valid offset range (soundness), iteration over stored locations in the layout's preferred order, and the structural operations with output types from §1a (`index_axis → Smaller`, `insert_axis → Larger`, slicing, permutation, broadcasting). None of these need strides: `index_axis` on any layout is "remove slot `k` from the shape, pin coordinate `i` in the location function", and each family chooses its `Smaller` — the strided family is closed and returns itself, a block or sparse family may return a derived wrapper. Iteration belongs on `Layout` too: the strided impl walks pointers, a general impl walks indices. Fast paths are an implementation detail of each layout, not a property of the trait.
+- **`Strided: Layout` is where strides are observable**, stored or computed: `strides()`, contiguity and `as_slice`, `is_standard_layout`, `from_shape_strides`, raw-view constructors, BLAS handoff. This is a short list, so the method-by-method audit (§3.4) is cheap.
+- **Rejected:** a single strided `Layout` trait (rules out the design targets), and "`Layout` internal-only in v1" (pays the audit cost without the benefit).
+
 ## 2. Next step: a minimal `Shape`
 
 The `shape-trait` branch has `Shape: Ranked` with `axis_len`, `iter`, and provided methods `size_checked`, `size_bytes_checked` and `iter_isize`. Questions to settle before it lands:
@@ -63,16 +72,18 @@ There's no public safe setter, but slicing, collapsing, inverting, permuting and
 - Should strides ever be `const`?
 
 ### 3.4 Layout
-- What's the minimal surface? Probably: the shape, the offset of an index, and the offset range (needed for soundness). Does `shape()` return `&Self::Shape` (works for stored shapes and for zero-sized `const` ones), or does `Layout` expose shape methods directly so shapes can be computed?
-- How does `Strided: Layout` relate to non-strided layouts? Make sure nothing in `Layout` assumes strides.
-- Which of today's methods only need `Layout`, and which need `Strided`? This needs a method-by-method audit (§5 is the starting point).
+The split is decided in §1b. What remains is the contract, driven by the design targets:
+- **Index → location for sparse.** `offset(index) -> isize` assumes every index has a stored element. Sparse layouts don't: an index maps to a stored offset *or* an implicit value. Options: `offset(index) -> Option<isize>` on `Layout` with dense layouts always `Some` (cost: every dense access pays a branch, unless dense layouts also implement a `Dense: Layout` marker with the infallible version); or a two-level design where `Layout` only promises *iteration* over `(index, offset)` pairs and random access is a sub-trait. The first is simpler; the second matches what sparse formats can actually do efficiently.
+- **Closure under structural ops.** Which of `index_axis`, slicing, permutation and broadcasting must every layout support, and which may be unavailable (CSR can index rows cheaply, columns not at all)? If some are optional, are they sub-traits or `Option`-returning methods? Derived wrappers (`Sub<L>`, `Sliced<L>`) are always *possible*; the question is whether the trait requires them.
+- **Minimal surface.** Probably: the shape, index → location, the offset range (soundness), and offset iteration. Does `shape()` return `&Self::Shape` (works for stored shapes and zero-sized `const` ones), or does `Layout` expose shape methods directly so shapes can be computed?
+- **Audit.** Which of today's `ArrayBase`/`ArrayRef` methods need only `Layout`, and which need `Strided`? Expected: `Strided` for `as_slice*`, `strides()`, `is_standard_layout`, `from_shape_strides`, raw views, BLAS; `Layout` for everything else. §5 is the starting point; the result should become a table here.
 
 ### 3.5 Index type
 - Should it be an associated type per layout? Sized or unsized for dynamic rank? Iterators like `indexed_iter` need something sized.
 - How does `NdIndex<E>` (tuples, arrays, `usize`, `&[usize]`) map onto it?
 
-### 3.6 Iteration order and non-strided layouts
-- Should iteration order be part of `Layout` or something separate? It can probably wait, as long as `Layout` doesn't rule it out.
+### 3.6 Iteration order
+- §1b puts "iterate stored locations in the layout's preferred order" on `Layout`. Still open: how callers ask for a *specific* order (logical C order for `iter()`, memory order for `map`/`fold`), and whether that is a second method, a parameter, or a separate trait.
 
 ### 3.7 Patterns, construction and other D-generic traits
 - `dim() -> Pattern` (tuples) is used a lot downstream. Should that become a conversion on concrete shapes, or stay only in the `D` world?
