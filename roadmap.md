@@ -108,7 +108,7 @@ Columns are the *layout* bound; the storage bound (`RawData`/`Data`/`DataMut`/ow
 What doesn't fit cleanly, each needing a decision before §4:
 
 1. **`Zip`/`NdProducer`** is specified as pointer + stride (`Ptr`, `uget_ptr`, `stride_of`, `split_at`, `layout()`). Under §1c it becomes handle + accessor + `Layout`, with the strided-dense inner loop as a fast path. This is the largest internal rewrite the split causes, and the place where "sparse ⊗ dense `Zip` is storage-driven" has to be implemented (when exactly one producer has `DENSE == false`).
-2. **Whole-array mutation on sparse** (`fill`, `assign`, `map_inplace`, `+=`) type-checks on `Layout + DataMut` but densifies the storage. Allow and document (scipy does, with a warning), or bound these by `Acc::DENSE`? Lean: allow — the methods are correct, just expensive, and sparse users already know what they're asking for.
+2. **Whole-array mutation on sparse** (`fill`, `assign`, `map_inplace`, `+=`) type-checks on `Layout + DataMut` but densifies the storage. **Decided: allow and document** (scipy does the same, with a warning). The methods are correct, just expensive, and sparse users know what they're asking for; bounding them by `Acc::DENSE` would make the generic surface lie about what sparse supports.
 3. **Reshape family**: today `into_shape*` *fails* when not contiguous; under the split it should either be bound by `Strided` or be `to_shape`-shaped (copy fallback). Lean: bound by `Strided`, keep `to_shape` as the generic one.
 4. **`push`/`append`** are dense-and-owned growth; sparse growth is entry insertion. Keep them dense-only; sparse gets its own (format-specific) surface.
 
