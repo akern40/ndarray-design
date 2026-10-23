@@ -166,3 +166,40 @@ This doesn't decide replacements. It's the input to §3.4 and §3.7.
 | `NdProducer`, `Zip`, `SliceArg`, `stack`/`concatenate`, broadcasting | layout + rank operations |
 
 The most-used compatibility surface downstream: `D::Smaller`/`RemoveAxis`, `Pattern`/`dim()`, `IntoDimension`, and the `shape()`/`strides()` slices.
+
+### 5.1 What doesn't survive the switch (against `upstream/refactor`)
+
+Today `D` plays three roles at once: the *type* parameter of `ArrayBase` (rank/family tag), a *shape value* (`raw_dim()`, `Ix2(3, 4)` as a constructor argument) and an *index value* (`a[Ix2(1, 2)]`, `NdIndex<D>`), plus the internal strides representation. The layout design keeps only the first (as `L`); shape values move to the layout's shape type, index values to `L::Index` (§3.5), strides inside `StridedLayout`. Everything below is a consequence of that split. The §3.4 audit says which *bound* a method needs; this list says which methods lose their *meaning*.
+
+**Gone: no counterpart, the concept doesn't exist after the switch.**
+
+| Today | Why it goes | What takes the role (if any) |
+|---|---|---|
+| `Dimension` as public API: `default_strides`, `fortran_strides`, `first_index`/`next_for(_f)`, `stride_offset(_checked)`, `is_contiguous`, `strides_equivalent`, `_fastest_varying_stride_order`, `min/max_stride_axis(strides)`, `slice()`/`slice_mut()`, `last_elem`/`set_last_elem`, `zeros`, `equal`, `size(_checked)`, `as_array_view(_mut)`, `from_dimension`, `into_pattern`, `insert_axis`/`try_remove_axis` | internal strided shape maths on a bare shape; a layout owns dim *and* strides, so there is nothing to call these on | private methods of `StridedLayout<_>` |
+| `DimensionExt`, `IxDynImpl`, `Dim<I>` + `Dim(..)`, `Convert` | representation of `D` | none public |
+| `RemoveAxis`, `DimAdd`, `DimMax` (traits on `D`) | per-`D` traits | `Smaller`/`Larger`/`Dyn` on the layout (§1a); rank-level `RAdd`/`RMax` for `stack`/broadcast arithmetic. `D: RemoveAxis` bounds are common downstream — a top compat item |
+| `IntoDimension`, `Dimension::Pattern` | the tuple ↔ `Dim` bridge | §3.7 open; see the `dim()` decision below |
+| `raw_dim() -> D` | there is no `D` value to return | shape by value: either `shape()` changes return type or a new accessor (decision below) |
+| `dim() -> D::Pattern` | `Pattern` is a `Dimension` associated type | decision below |
+| `into_dimensionality::<D2>()` | cross-`D` conversion with runtime rank check | still needed (dyn → static): a fallible layout conversion (`TryFrom<DynLayout> for StridedLayout<2>` or `into_layout::<L2>()`); the name goes |
+| `Ix0()..Ix6()`, `IxDyn(&[..])`, `Dim(..)` *value* constructors | build a `D` value for shape or index use | shape use → shape constructors / tuples; index use → `L::Index`. The *type* aliases `Ix0..IxDyn` stay as layout aliases (§4.1 step 4) |
+| `into_shape`, `reshape`, `into_raw_vec` | already `#[deprecated]` since 0.16 | `into_shape_with_order`/`to_shape`, `into_raw_vec_and_offset` |
+
+**Changed signature, same name and meaning.**
+
+- Every `E: IntoDimension` / `Sh: ShapeBuilder` parameter and `-> ArrayBase<S, E::Dim>` result: `to_shape`, `into_shape_with_order`, `into_shape_clone`, `broadcast`, `windows(_with_stride)`, `exact_chunks(_mut)`, `permuted_axes`, `from_elem`, `from_shape_fn`, `from_shape_simple_fn`, `from_shape_vec(_unchecked)`, `build_uninit`, `zeros`/`ones`/`default`/`uninit`, `ArrayView::from_shape(_ptr)`, `RawArrayView::from_shape_ptr`, `indices(shape)`. The argument becomes "something that builds a layout" and the result type follows it (§1a). `ShapeBuilder`/`Shape`/`StrideShape`/`ShapeArg`, `.f()`, `.strides(..)` are replaced by whatever that construction API is (§3.7).
+- `Index`/`IndexMut`, `get(_mut)`, `uget(_mut)`, `get_ptr(_mut)`: `I: NdIndex<D>` → indexed by `L::Index` or `NdIndex<L>` (§3.5).
+- `slice*`, `multi_slice_*`: `SliceArg<D>` → `SliceArg<L>`, `SliceInfo<T, Din, Dout>` over layouts; `s![]` unchanged.
+- `assign<E: Dimension>`, `zip_mut_with`, `Zip::and_broadcast`, arithmetic ops: `E: Dimension`/`DimMax` → `L2: Layout` with rank-level broadcasting.
+- `into_dyn()` → `-> ArrayBase<S, L::Dyn>`. `ndim()` → rank. `NdProducer::Dim` → a layout (still `Strided`, §3.4).
+- `strides()`, `stride_of`, `axes()`: exist only for `L: Strided` (same today in practice).
+- Dense-only (`as_ptr`, `as_slice*`, `raw_view*`, `into_raw_vec_and_offset`, `cast`, `split_complex`, `cell_view`, `assume_init`, `push`/`append`/`reserve`, BLAS): still exist, but on `ArrayRef<Dense<A>, L>` rather than every `ArrayRef` (§3.4).
+
+**Not touched by this design.** The `Axis(usize)` newtype and the ~40 `*_axis`/`axis_*` methods (`index_axis*`, `slice_axis*`, `collapse_axis`, `axis_iter*`, `lanes`, `sum_axis`, `fold_axis`, `map_axis`, `insert_axis`/`remove_axis`, `split_at`, `stack`/`concatenate`, …) survive unchanged here; the axis-handle redesign is a separate, undecided track and must not be conflated with the layout switch. In-place rank-changing ops on `IxDyn` (`insert_axis_inplace`, `index_axis_inplace`) stay, on the dyn layout only, as today.
+
+**Survives as is.** Everything else — the whole `Layout` block of the audit (`len`, `is_empty`, `iter*`, `indexed_iter*`, `for_each`, `fold`, `map*`, `view*`, `to_owned`, `into_shared`, `into_owned`, `t`/`reversed_axes`/`swap_axes`, reductions, `dot`) plus the axis-ops block.
+
+**Two decisions this list forces (open):**
+
+1. **`dim()` / `Pattern`.** `let (m, n) = a.dim()` is the most-used shape accessor downstream. Options: (a) drop it; shape types for rank-static layouts *are* tuples, so `shape()` returns `(usize, usize)` for rank 2 — but then `shape()` can't also be `&[usize]`; (b) keep `dim()` as sugar defined only for rank-static strided layouts (`L::Shape: Into<(usize, …)>`), with `Pattern` living on the shape type rather than on the array type; (c) keep it only in the `D` compatibility layer and let it die with `Dimension`. Lean: (b) — the method has a natural meaning (the shape *is* a tuple when the rank is static); only its mechanism is `Dimension`-specific.
+2. **`raw_dim()` vs `shape()`.** Today `shape() -> &[usize]` and `raw_dim() -> D` (owned). With `D` gone, either `shape()` becomes the owned shape value (breaking the slice return that is also used a lot), or `shape()` stays `&[usize]` and the owned shape gets a new name (`layout().shape()`, `shape_owned()`). Lean: keep `shape() -> &[usize]`, expose the owned value through the layout, and let `raw_dim` go.
