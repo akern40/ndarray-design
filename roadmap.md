@@ -199,7 +199,20 @@ Today `D` plays three roles at once: the *type* parameter of `ArrayBase` (rank/f
 
 **Survives as is.** Everything else — the whole `Layout` block of the audit (`len`, `is_empty`, `iter*`, `indexed_iter*`, `for_each`, `fold`, `map*`, `view*`, `to_owned`, `into_shared`, `into_owned`, `t`/`reversed_axes`/`swap_axes`, reductions, `dot`) plus the axis-ops block.
 
-**Two decisions this list forces (open):**
+**Shape accessors: what the data says (open).** Counts of call sites (`grep`, 2026-10-19; ndarray = `upstream/refactor` src / tests+examples+benches; downstream = current masters):
 
-1. **`dim()` / `Pattern`.** `let (m, n) = a.dim()` is the most-used shape accessor downstream. Options: (a) drop it; shape types for rank-static layouts *are* tuples, so `shape()` returns `(usize, usize)` for rank 2 — but then `shape()` can't also be `&[usize]`; (b) keep `dim()` as sugar defined only for rank-static strided layouts (`L::Shape: Into<(usize, …)>`), with `Pattern` living on the shape type rather than on the array type; (c) keep it only in the `D` compatibility layer and let it die with `Dimension`. Lean: (b) — the method has a natural meaning (the shape *is* a tuple when the rank is static); only its mechanism is `Dimension`-specific.
-2. **`raw_dim()` vs `shape()`.** Today `shape() -> &[usize]` and `raw_dim() -> D` (owned). With `D` gone, either `shape()` becomes the owned shape value (breaking the slice return that is also used a lot), or `shape()` stays `&[usize]` and the owned shape gets a new name (`layout().shape()`, `shape_owned()`). Lean: keep `shape() -> &[usize]`, expose the owned value through the layout, and let `raw_dim` go.
+| | ndarray src | ndarray tests | ndarray-stats | ndarray-linalg |
+|---|---|---|---|---|
+| `.shape()` | 107 | 107 | 31 | 17 |
+| `.dim()` | 38 | 101 | 2 | 20 |
+| `.raw_dim()` | 53 | 16 | 3 | 2 |
+| `.ndim()` | 166 | 5 | 16 | 0 |
+| `.len_of(` | 43 | 8 | 5 | 11 |
+| `RemoveAxis` | — | — | 23 | 0 |
+
+So `shape()` is the most-used accessor, not `dim()`. More telling is *what* `dim()` is used for: of the 101 test/example uses, 65 pass it straight into a constructor (`Array::zeros(a.dim())`, `from_shape_fn(a.dim(), …)`), 9 are `assert_eq!(a.dim(), (m, n))`, and only 12 unpack it (`let (m, n) = a.dim()`); ndarray-linalg is 4 / 7 / 4. That is, `dim()` is mostly used in `raw_dim()`'s role — *the shape as an owned value* — and tuples are just the convenient literal for it. So the two accessors answer one need, and the language question ("`dim` is overloaded; the operation is unpacking a shape") has a clean answer: there is a **shape value** (owned, usable as a constructor argument, comparable to a literal, unpackable to a tuple when the rank is static) and a **slice/trait view** of it for rank-generic code.
+
+Decisions this leaves:
+
+1. **What `shape()` returns.** `&[usize]` is not possible in general: a `(Const<3>, Dyn)` shape has no `[usize; 2]` in memory (`Const<3>` has no storage), so returning a slice would require the layout to keep a materialised shadow copy next to the typed shape — redundant state, and it makes `Const` pointless as a space saving. Options: (a) `shape() -> &L::Shape`, with the §2 `Shape` trait (`axis_len(k)`, `ndim`, `iter`) as the rank-generic reader, `as_slice()` only on shapes that have one (`StridedLayout<N>`, dyn), and `[usize; N]` by value for rank-static shapes; (b) keep `&[usize]` and accept the shadow copy on the const family only (`StridedLayout` stores `[usize; N]` anyway). Lean: (a) for the long run; (b) is a legitimate minimise-ripple choice for the transition since the const family doesn't exist yet. To be settled by the spike.
+2. **The shape value and tuple unpacking.** The 65 "pass the shape to a constructor" sites want an owned shape value; `raw_dim()` is that today, under a `Dimension` name. The 12+4 unpack sites want `Into<(usize, usize)>` on rank-static shapes. Both live on the shape type, not on the array; `dim()` and `raw_dim()` as names go (`dim` is overloaded; the operation is unpacking a shape). Whether the array keeps a by-value `shape()` *and* a borrowed one, and what they're called, is a naming question for the spike. `ndarray-stats`' 23 `RemoveAxis` bounds confirm `D: RemoveAxis` → layout `Smaller` as the other top compat item.
