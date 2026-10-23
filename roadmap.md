@@ -154,7 +154,28 @@ Governed by the minimise-ripple rule (§3.4): each step compiles and passes the 
 - *Variance.* With `parts: ArrayPartsSized<<S::Acc as Accessor>::Handle, D>` the projection makes `ArrayBase` invariant in `S`, and `ArrayView<'a, …>` stops being covariant in `'a` (`tests/variance.rs` fails to compile). Fix: the handle is a defaulted fourth parameter, `ArrayBase<S, D, A = S::Elem, H = <S::Acc as Accessor>::Handle>`, the same trick the existing `A` parameter already is. `ArrayRefBase<Acc, D>` still holds the projection, so `ArrayRef<&'a T, D>` is now invariant in `'a`; untested today, but the same `H` default would fix it if it matters.
 - *Exactly 11 generic sites assumed the handle is a pointer*, and they sort cleanly: `RawDataClone::clone_with_ptr`/`clone_from_with_ptr` and the internal `from_data_ptr` become handle-typed (generic, no dense assumption); `DataOwned` (constructs from a `Vec`) and `RawDataSubst` (`MaybeUninit` reinterpretation) are dense by supertrait bound `Acc = Dense<Elem>`, which is the §3.4 "dense-only" row made precise; `as_mut_ptr`/`raw_view_mut` (on `S: RawDataMut`, no `Deref`) reach the pointer through the `AsRef<RawRef<A, D>>` cast.
 - *Where the dense assumption now lives:* the `Deref`/`AsRef` casts in `impl_ref_types.rs` cast `ArrayParts<<S::Acc as Accessor>::Handle, D>` to the dense alias for any `S`. It is sound only because every `Acc` is `Dense` today. The honest `Target = ArrayRefBase<S::Acc, D>` is the next experiment: it will reject every call from a generic `impl<S: Data>` block into an `ArrayRef<A, D>`-only method, i.e. it measures how much of `impl_methods` must be re-homed onto `ArrayRefBase<Acc, D>` with `Layout`/`AxisOps`/`Strided` bounds before a non-dense storage can exist.
-- *Benchmark gate:* see below once measured.
+- *Benchmark gate (passed).* `cargo +nightly bench --bench bench1` on `upstream/refactor` vs `layout-spike` (ns/iter, same machine, sequential runs; noise is ±10% between runs of the *same* binary):
+
+  | bench | refactor | layout-spike |
+  |---|---:|---:|
+  | `iter_sum_2d_regular` | 166 | 163 |
+  | `iter_sum_1d_regular` | 184 | 175 |
+  | `sum_2d_regular` | 106 | 103 |
+  | `add_2d_regular` | 275 | 274 |
+  | `add_2d_strided` | 1662 | 1714 |
+  | `add_2d_broadcast_1_to_2` | 329 | 308 |
+  | `add_2d_zip_cutout` | 446 | 331 |
+  | `fold_sum_i32_2d_regular` | 210 | 163 |
+  | `fold_sum_i32_2d_stride` | 1313 | 1094 |
+  | `iadd_scalar_2d_regular` | 223 | 212 |
+  | `iter_sum_2d_cutout` | 3254 | 2925 |
+  | `iter_sum_2d_transpose_regular` | 3040 | 3647 |
+  | `bench_row_iter` | 315 | 271 |
+  | `mean_axis0` | 2028 | 1728 |
+  | `into_dyn_ix3` | 38 | 31 |
+  | `scalar_add_1` | 327 | 302 |
+
+  The one apparent regression, `iter_sum_2d_transpose_regular` (+15–20%, reproducible, and bisecting to ~+8% after the pure field move of step 1 and ~+10% more after step 2 with no change to the hot code), disappears when both binaries are built with `-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=6` (3.35k vs 3.29k): it is loop-alignment noise, not a cost of the design. Dense `uget`/`Zip`/iteration paths are unchanged in cost, as expected for a `NonNull<A>` handle with `#[inline(always)]` `offset`.
 
 ### 4.2 Still open
 
