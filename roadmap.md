@@ -60,6 +60,16 @@ Decided:
 - **Mockup:** `mockups/storage-handle/` is a compiling, Miri-clean model of all of the above (dense + sparse accessors, `Deref` by cast, layout-only transpose/slice on sparse, insertion through `&mut ArrayRef`, CoW handle refresh, branch-free dense codegen). Two findings from it: (1) the stable-handle rule is stricter under Stacked Borrows than "lives on the heap" — an owned storage must not hold its buffer through a `Box` (moving it is a `Unique` retag that invalidates the handle); raw pointer + `Drop`, as `OwnedRepr` already does; (2) slicing needs `Accessor::offset(handle, by)` (mdspan's `accessor.offset`), because a sparse handle can't be bumped like a data pointer; the alternative is a base offset inside every layout.
 - **Rejected:** sparse as a `Layout` (would make `offset(index)` fallible, layouts heap-owning with a borrowed form for views, and dense code would pay for all of it); and "dense `ArrayRef` plus separate sparse structs sharing array-level traits" (two ways to write generics). The latter remains a fallback if the handle abstraction proves too costly in the dense hot paths (§4, performance).
 
+### 1d. Decided 2026-10-19 (toward a "1.0a" branch; minimise-ripple is dropped)
+
+- `ArrayBase<S, L>`: the layout *replaces* `D`; the index type is `L::Index`, the shape type `L::Shape`. No third parameter, no `D`.
+- `shape()` returns `&L::Shape` (a `Shape` trait: `axis_len`, `ndim`, `size`, `iter`; conversions to arrays/tuples), not `&[usize]`. Const shapes `(Const<3>, Dyn)` need no shadow slice.
+- No sealed traits. The data traits are `unsafe trait`s whose contract is documented; `private_decl!`/`private_impl!` go. Formats come in via `Handle` + `Buffer`, layouts via `Layout` + `AxisOps`, new ownership kinds via the (unsafe) data traits.
+- `DataOwned` dissolves: construction from a `Vec` is a `DenseBuf` constructor; the wrapper side becomes a generic `FromBuffer { fn from_buffer(B) -> Self }` on `Owned`/`Shared`/`Cow` (every format); the `MaybeUninit` twin moves to `Buffer::Uninit`.
+- `RawDataSubst`: marked TODO on the branch; revisit (buffer-level `DenseBuf<A> -> DenseBuf<B>` reinterpretation used by `cast`/`assume_init`).
+- Storage = `wrapper<Buffer>` with `Handle` as the cursor (see §4.1 `7a376624`); the user-extensible points are exactly: a format (`Handle` + `Buffer`), a layout (`Layout` + `AxisOps`), a shape kind (`Shape`), an index literal (`IntoIndex`).
+- Next spike: constant strides — `StridedLayout<Sh, St = Sh::Contiguous>` with `St` a `Const`/`Dyn` tuple like the shape; the cost is per-op output types on `AxisOps` (`Sliced`, `Collapsed`) beyond `Smaller`/`Larger`/`Dyn`.
+
 ## 2. Next step: a minimal `Shape`
 
 The `shape-trait` branch has `Shape: Ranked` with `axis_len`, `iter`, and provided methods `size_checked`, `size_bytes_checked` and `iter_isize`. Questions to settle before it lands:
