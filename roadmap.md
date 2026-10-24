@@ -197,6 +197,8 @@ What this measured, beyond the count:
 
 **Dependency rule (decided).** Dependencies run one way: *storage → accessor* (`S::Acc`, `ViewRepr<&Acc>`), *accessor → nothing* (`Elem`, `Handle`, `offset`, `get`, `get_mut`). The accessor never names a storage type, a view, or an `ArrayBase`. If the owned/shared/view kinds of one format ever need a type-level tie (e.g. a sparse `to_owned` that stays sparse), that is a fourth, separate trait that the *storages* point at — not an associated type on `Accessor`.
 
+**Done: `Sparse<A>` in the fork (`386ca93a`).** `src/sparse.rs`: `SparseBuf { span, fill, entries: Vec<(usize, A)> }`, `SparseHandle { buf: NonNull<SparseBuf>, base }`, `Sparse<A>: Accessor` (`get` = binary search else `&fill`; `get_mut` inserts), `OwnedSparse<A>` implementing `RawData`/`RawDataMut`/`Data`/`DataMut`/`RawDataClone`, `SparseArray<A, D>`. Works with no sparse-specific array code: indexing read/write, `get`, `t`, `slice`, `index_axis`, `view`, `into_owned` (densify), deep `clone`. Finding: `slice`/`slice_axis`/`slice_each_axis`/`index_axis` (+`_mut`) and `t` were dense only because they *returned* `ArrayView<A, D>`; bodies were layout-only. Moved to `ArrayRefBase<Acc, D>` returning `ArrayBase<ViewRepr<&Acc>, D>`. Does not compile on sparse (all behind `Iter`/`Zip`): `iter`, `sum`, `map`/`mapv`, `fill`, arithmetic, `==`, `Debug`. Dense bounds in src: 95 (unchanged — these were alias returns, not bounds).
+
 ### 4.2 Still open
 
 - **Step 1 details:** what `raw_dim()`, `dim()` and the slice-returning `shape()`/`strides()` cost once they read through `D::Layout` (expected: nothing, same fields). Do the `Dim` types also implement the new traits directly, or only via `StridedLayout<D>`?
