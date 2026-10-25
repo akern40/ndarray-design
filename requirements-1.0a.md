@@ -10,7 +10,10 @@ A plain list of what 1.0a has to do. No design details here; those live in `road
 - Sparse arrays.
 - No sealed traits: other crates can add their own kinds of storage and layout.
 - Works without the standard library.
-- Named axes are possible as a small add-on crate, with no changes to core.
+- The core crate's safety is provable, not just tested.
+- Parallel work: split arrays (tiles included) into independent pieces for threads, safely.
+- Work over arrays too big for memory, one chunk at a time.
+- GPUs: ndarray is either the base GPU libraries build on or ships its own GPU crate (how is being worked out).
 
 ## Noted, wording still open
 
@@ -18,18 +21,27 @@ A plain list of what 1.0a has to do. No design details here; those live in `road
 - Arrays of packed elements smaller than a byte (4-bit and 8-bit number formats, bit-packed booleans).
 - An array can keep memory that another library allocated alive, so it can be returned, stored or sent to another thread, not just borrowed.
 
+## Low priority: don't rule out
+
+- Named axes, typed axes and typed indices, as add-on crates. Core only has to avoid blocking them.
+- Axes that carry labels or coordinates (time stamps, latitudes), as an add-on.
+
+## Unsure
+
+- Streams: arrays that keep growing along one axis, and rolling windows. It's not yet clear what "support" would mean.
+
+## Out of scope
+
+- Index origins other than zero.
+- Ragged arrays. A padded ragged array can be built with a custom layout.
+
 ## Proposed, not yet discussed
 
 - Exchange arrays without copying with Python (NumPy, PyTorch, JAX), Arrow and GPU libraries.
 - Convert array references to and from the other Rust array crates (faer, mdarray, nalgebra) without copying.
 - A small, stable core that other crates can depend on for years.
-- Axes can carry labels or coordinates, not just names (time stamps, latitudes), as an add-on.
-- Work over arrays too big for memory, one chunk at a time, with the chunks supplied by another crate.
-- Arrays that keep growing along one axis (streams, sensors, audio), including fixed-size rolling windows.
 - Arrays that know where they sit inside a bigger array (halo cells, a piece of a distributed array, a chunk of a file).
 - View one field of an array of records, or a fixed-size array element, without copying.
 - Element-wise operations whose result has a different element type (units of measure, mixed precision).
-- Split a mutable array into non-overlapping pieces, tiles included, and hand them to threads safely.
-- Views and layouts usable without an allocator, so the same types can run on embedded targets and in GPU kernels written in Rust.
+- Views and layouts usable without an allocator, so the same types can run on embedded targets.
 - Arrays with many axes (dozens) stay practical.
-- Ragged arrays (rows of different lengths): in scope or not?
