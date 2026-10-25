@@ -11,9 +11,11 @@ A plain list of what 1.0a has to do. No design details here; those live in `road
 - No sealed traits: other crates can add their own kinds of storage and layout.
 - Works without the standard library.
 - The core crate's safety is provable, not just tested.
-- Parallel work: split arrays (tiles included) into independent pieces for threads, safely.
+- Parallel work: split arrays (tiles included) into independent pieces for CPU or GPU threads, safely.
 - Work over arrays too big for memory, one chunk at a time.
-- GPUs: ndarray is either the base GPU libraries build on or ships its own GPU crate (how is being worked out).
+- GPU memory: arrays whose elements the CPU can't read still get every shape operation (slicing, transposing, reshaping, splitting into tiles).
+- GPU kernels: the same view and layout types work inside GPU kernels written in Rust.
+- GPU interop: convert to and from the GPU array types of other Rust crates without copying.
 
 ## Noted, wording still open
 
